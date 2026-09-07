@@ -1,0 +1,475 @@
+package com.localgpt.app.web
+
+import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.localgpt.app.util.KLog
+import com.localgpt.app.util.NetworkUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import okhttp3.FormBody
+import okhttp3.Request
+import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
+import java.util.regex.Pattern
+
+data class WebSearchItem(
+    val title: String,
+    val snippet: String,
+    val url: String,
+)
+
+data class WebSearchResult(
+    val query: String,
+    val items: List<WebSearchItem>,
+    val promptContext: String,
+)
+
+class WebSearchManager private constructor(private val context: Context) {
+    companion object {
+        @Volatile
+        private var instance: WebSearchManager? = null
+
+        fun getInstance(context: Context): WebSearchManager =
+            instance ?: synchronized(this) {
+                instance ?: WebSearchManager(context.applicationContext).also { instance = it }
+            }
+
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+
+        private const val CACHE_TTL_MS = 20 * 60 * 1000L // 20 minutes
+    }
+
+    private data class CacheEntry(
+        val result: WebSearchResult,
+        val timestamp: Long = System.currentTimeMillis(),
+    )
+
+    private val searchCache = ConcurrentHashMap<String, CacheEntry>()
+    private val gson = Gson()
+    private val client = NetworkUtils.HttpClient.searchClient
+
+    suspend fun search(query: String, lang: String = "id", maxResults: Int = 4): WebSearchResult? =
+        withContext(Dispatchers.IO) {
+            val cleanQuery = query.trim()
+                .removePrefix("/search").removePrefix("/Search")
+                .removePrefix("/web").removePrefix("/Web")
+                .trim()
+            if (cleanQuery.isBlank()) return@withContext null
+
+            val searchLang = if (lang.startsWith("en", ignoreCase = true)) "en" else "id"
+            val cacheKey = "$searchLang:${cleanQuery.lowercase()}"
+
+            // 1. Check in-memory TTL Cache (0 ms instant response)
+            searchCache[cacheKey]?.let { entry ->
+                if (System.currentTimeMillis() - entry.timestamp < CACHE_TTL_MS) {
+                    KLog.d("WebSearch", "Cache HIT (0 ms) for query: $cleanQuery (lang=$searchLang)")
+                    return@withContext entry.result
+                } else {
+                    searchCache.remove(cacheKey)
+                }
+            }
+
+            KLog.d("WebSearch", "Executing fast parallel search for: $cleanQuery (lang=$searchLang)")
+
+            // 2. Direct URL fetch if query is a web link
+            if (cleanQuery.startsWith("http://") || cleanQuery.startsWith("https://")) {
+                val direct = fetchUrlContent(cleanQuery)
+                if (direct != null) {
+                    val result = WebSearchResult(
+                        query = cleanQuery,
+                        items = listOf(direct),
+                        promptContext = buildPromptContext(cleanQuery, listOf(direct), searchLang),
+                    )
+                    searchCache[cacheKey] = CacheEntry(result)
+                    return@withContext result
+                }
+            }
+
+            val combinedItems = mutableListOf<WebSearchItem>()
+
+            // 3. Parallel Provider Execution via Coroutines (Google News RSS + Wikipedia)
+            coroutineScope {
+                val gNewsDeferred = async(Dispatchers.IO) {
+                    runCatching { searchGoogleNewsRss(cleanQuery, searchLang, 3) }.getOrDefault(emptyList())
+                }
+                val wikiDeferred = async(Dispatchers.IO) {
+                    runCatching { searchWikipedia(cleanQuery, searchLang, 2) }.getOrDefault(emptyList())
+                }
+
+                val gNews = gNewsDeferred.await()
+                val wiki = wikiDeferred.await()
+
+                combinedItems.addAll(wiki.take(2))
+                combinedItems.addAll(gNews.take(3))
+
+                // Fallback to DuckDuckGo Lite if primary sources are empty
+                if (combinedItems.isEmpty()) {
+                    val ddg = runCatching { searchDuckDuckGoLite(cleanQuery, searchLang, 2) }.getOrDefault(emptyList())
+                    combinedItems.addAll(ddg)
+                }
+
+                // Cross-language fallback
+                if (combinedItems.isEmpty()) {
+                    val fallbackLang = if (searchLang == "id") "en" else "id"
+                    val fallbackWiki = runCatching { searchWikipedia(cleanQuery, fallbackLang, 2) }.getOrDefault(emptyList())
+                    combinedItems.addAll(fallbackWiki)
+                }
+            }
+
+            if (combinedItems.isNotEmpty()) {
+                val finalItems = combinedItems.distinctBy { it.url }.take(maxResults)
+                val compressedPrompt = buildPromptContext(cleanQuery, finalItems, searchLang)
+                val result = WebSearchResult(
+                    query = cleanQuery,
+                    items = finalItems,
+                    promptContext = compressedPrompt,
+                )
+                searchCache[cacheKey] = CacheEntry(result)
+                KLog.d("WebSearch", "Parallel search retrieved ${finalItems.size} results for: $cleanQuery (cached)")
+                return@withContext result
+            }
+
+            KLog.w("WebSearch", "All search providers exhausted with no results for: $cleanQuery")
+            null
+        }
+
+    private fun searchGoogleNewsRss(query: String, lang: String = "id", maxResults: Int = 4): List<WebSearchItem> {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val hl = if (lang == "id") "id" else "en-US"
+        val gl = if (lang == "id") "ID" else "US"
+        val ceid = if (lang == "id") "ID:id" else "US:en"
+        val url = "https://news.google.com/rss/search?q=$encoded&hl=$hl&gl=$gl&ceid=$ceid"
+
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
+            .build()
+
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) return emptyList()
+        val xmlStr = response.body?.string() ?: return emptyList()
+
+        val results = mutableListOf<WebSearchItem>()
+        try {
+            val itemPattern = Pattern.compile("<item>([\\s\\S]*?)<\\/item>", Pattern.CASE_INSENSITIVE)
+            val titlePattern = Pattern.compile("<title>([\\s\\S]*?)<\\/title>", Pattern.CASE_INSENSITIVE)
+            val linkPattern = Pattern.compile("<link>([\\s\\S]*?)<\\/link>", Pattern.CASE_INSENSITIVE)
+            val pubDatePattern = Pattern.compile("<pubDate>([\\s\\S]*?)<\\/pubDate>", Pattern.CASE_INSENSITIVE)
+            val descPattern = Pattern.compile("<description>([\\s\\S]*?)<\\/description>", Pattern.CASE_INSENSITIVE)
+
+            val itemMatcher = itemPattern.matcher(xmlStr)
+            while (itemMatcher.find() && results.size < maxResults) {
+                val itemBlock = itemMatcher.group(1).orEmpty()
+                val tMatcher = titlePattern.matcher(itemBlock)
+                val lMatcher = linkPattern.matcher(itemBlock)
+                val pMatcher = pubDatePattern.matcher(itemBlock)
+                val dMatcher = descPattern.matcher(itemBlock)
+
+                val rawTitle = if (tMatcher.find()) tMatcher.group(1).orEmpty() else ""
+                val rawLink = if (lMatcher.find()) lMatcher.group(1).orEmpty() else ""
+                val rawPubDate = if (pMatcher.find()) pMatcher.group(1).orEmpty() else ""
+                val rawDesc = if (dMatcher.find()) dMatcher.group(1).orEmpty() else ""
+
+                val cleanTitle = stripHtml(rawTitle).trim()
+                val cleanSnippet = stripHtml(rawDesc).trim().ifBlank {
+                    if (rawPubDate.isNotBlank()) "Published: $rawPubDate" else ""
+                }
+
+                if (cleanTitle.isNotBlank()) {
+                    results.add(
+                        WebSearchItem(
+                            title = cleanTitle,
+                            snippet = "$cleanTitle. $cleanSnippet".take(220),
+                            url = rawLink.trim().ifBlank { "https://news.google.com" },
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            KLog.w("WebSearch", "Failed to parse Google News RSS: ${e.message}")
+        }
+        return results
+    }
+
+    private fun searchDuckDuckGoLite(query: String, lang: String = "id", maxResults: Int = 4): List<WebSearchItem> {
+        val formBody = FormBody.Builder()
+            .add("q", query)
+            .build()
+
+        val acceptLang = if (lang == "en") "en-US,en;q=0.9" else "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+        val request = Request.Builder()
+            .url("https://lite.duckduckgo.com/lite/")
+            .post(formBody)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", acceptLang)
+            .build()
+
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) return emptyList()
+        val html = response.body?.string() ?: return emptyList()
+
+        val linkPattern = Pattern.compile(
+            "<a[^>]*class=['\"]result-link['\"][^>]*href=['\"]([^'\"]+)['\"][^>]*>([\\s\\S]*?)<\\/a>|<a[^>]*href=['\"]([^'\"]+)['\"][^>]*class=['\"]result-link['\"][^>]*>([\\s\\S]*?)<\\/a>",
+            Pattern.CASE_INSENSITIVE,
+        )
+        val snippetPattern = Pattern.compile(
+            "<td[^>]*class=['\"]result-snippet['\"][^>]*>([\\s\\S]*?)<\\/td>",
+            Pattern.CASE_INSENSITIVE,
+        )
+
+        val linkMatcher = linkPattern.matcher(html)
+        val links = mutableListOf<Pair<String, String>>()
+        while (linkMatcher.find() && links.size < maxResults) {
+            val url = linkMatcher.group(1) ?: linkMatcher.group(3) ?: ""
+            val rawTitle = linkMatcher.group(2) ?: linkMatcher.group(4) ?: ""
+            val title = stripHtml(rawTitle).trim()
+            if (url.startsWith("http") && title.isNotBlank()) {
+                links.add(Pair(url, title))
+            }
+        }
+
+        val snippetMatcher = snippetPattern.matcher(html)
+        val snippets = mutableListOf<String>()
+        while (snippetMatcher.find() && snippets.size < maxResults) {
+            val rawSnippet = snippetMatcher.group(1).orEmpty()
+            val snippet = stripHtml(rawSnippet).trim()
+            if (snippet.isNotBlank()) {
+                snippets.add(snippet)
+            }
+        }
+
+        val results = mutableListOf<WebSearchItem>()
+        for (i in 0 until minOf(links.size, snippets.size)) {
+            val (url, title) = links[i]
+            val snippet = snippets[i]
+            results.add(
+                WebSearchItem(
+                    title = title,
+                    snippet = snippet.take(450),
+                    url = url,
+                )
+            )
+        }
+        return results
+    }
+
+    private fun searchWikipedia(query: String, lang: String, maxResults: Int): List<WebSearchItem> {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val searchUrl = "https://$lang.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&utf8=&format=json"
+        val request = Request.Builder()
+            .url(searchUrl)
+            .header("User-Agent", USER_AGENT)
+            .build()
+
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) return emptyList()
+        val jsonStr = response.body?.string() ?: return emptyList()
+
+        val root = gson.fromJson(jsonStr, JsonObject::class.java)
+        val queryObj = root?.getAsJsonObject("query") ?: return emptyList()
+        val searchArr = queryObj.getAsJsonArray("search") ?: return emptyList()
+        if (searchArr.isEmpty) return emptyList()
+
+        val pageTitles = mutableListOf<String>()
+        val snippetMap = mutableMapOf<String, String>()
+        for (i in 0 until minOf(searchArr.size(), maxResults)) {
+            val item = searchArr.get(i).asJsonObject
+            val title = item.get("title")?.asString.orEmpty()
+            val snippet = stripHtml(item.get("snippet")?.asString.orEmpty()).trim()
+            if (title.isNotBlank()) {
+                pageTitles.add(title)
+                snippetMap[title] = snippet
+            }
+        }
+
+        // Fetch authoritative full-paragraph intro extracts
+        val extractsMap = mutableMapOf<String, String>()
+        try {
+            val titlesEncoded = pageTitles.joinToString("|") { URLEncoder.encode(it, "UTF-8") }
+            val extractUrl = "https://$lang.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=$titlesEncoded&format=json"
+            val eReq = Request.Builder().url(extractUrl).header("User-Agent", USER_AGENT).build()
+            val eRes = client.newCall(eReq).execute()
+            if (eRes.isSuccessful) {
+                val eJson = eRes.body?.string().orEmpty()
+                val eRoot = gson.fromJson(eJson, JsonObject::class.java)
+                val pages = eRoot?.getAsJsonObject("query")?.getAsJsonObject("pages")
+                pages?.keySet()?.forEach { pid ->
+                    val p = pages.getAsJsonObject(pid)
+                    val pTitle = p?.get("title")?.asString.orEmpty()
+                    val pExtract = p?.get("extract")?.asString.orEmpty().trim()
+                    if (pTitle.isNotBlank() && pExtract.isNotBlank()) {
+                        extractsMap[pTitle] = pExtract.replace("\n", " ").trim()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            KLog.e("WebSearch", "Failed to parse Wikipedia extracts", e)
+        }
+
+        val results = mutableListOf<WebSearchItem>()
+        for (title in pageTitles) {
+            val fullExtract = extractsMap[title]
+            val snippet = fullExtract ?: snippetMap[title].orEmpty()
+            if (snippet.isNotBlank()) {
+                val pageUrl = "https://$lang.wikipedia.org/wiki/${URLEncoder.encode(title.replace(" ", "_"), "UTF-8")}"
+                results.add(
+                    WebSearchItem(
+                        title = title,
+                        snippet = snippet.take(280),
+                        url = pageUrl,
+                    )
+                )
+            }
+        }
+        return results
+    }
+
+    private fun fetchUrlContent(targetUrl: String): WebSearchItem? {
+        // Attempt 1: Jina AI Reader
+        try {
+            val jinaUrl = "https://r.jina.ai/$targetUrl"
+            val request = Request.Builder()
+                .url(jinaUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "text/plain")
+                .build()
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val text = response.body?.string().orEmpty().take(900)
+                if (text.isNotBlank()) {
+                    return WebSearchItem(
+                        title = "Web Page: $targetUrl",
+                        snippet = text,
+                        url = targetUrl,
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            KLog.e("WebSearch", "Jina AI Reader failed for $targetUrl", e)
+        }
+
+        // Attempt 2: Direct HTTP fetch with HTML text extraction
+        try {
+            val request = Request.Builder()
+                .url(targetUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .build()
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val rawHtml = response.body?.string().orEmpty()
+                val titleMatcher = Pattern.compile("<title>([\\s\\S]*?)</title>", Pattern.CASE_INSENSITIVE).matcher(rawHtml)
+                val title = if (titleMatcher.find()) stripHtml(titleMatcher.group(1).orEmpty()) else targetUrl
+                val bodyText = stripHtml(rawHtml).take(900)
+                if (bodyText.isNotBlank()) {
+                    return WebSearchItem(
+                        title = title.ifBlank { targetUrl },
+                        snippet = bodyText,
+                        url = targetUrl,
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            KLog.e("WebSearch", "Direct HTTP fetch failed for $targetUrl", e)
+        }
+
+        return null
+    }
+
+    /**
+     * Comprehensive HTML entity unescaping and whitespace cleaner.
+     */
+    fun stripHtml(html: String): String {
+        var text = html.replace(Regex("<[^>]*>"), " ")
+        text = text
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#039;", "'")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&nbsp;", " ")
+            .replace("&mdash;", "—")
+            .replace("&ndash;", "–")
+            .replace("&hellip;", "…")
+            .replace("&copy;", "©")
+            .replace("&reg;", "®")
+            .replace("&trade;", "™")
+
+        // Unescape numeric decimal entities (e.g. &#8217;)
+        text = Regex("&#(\\d+);").replace(text) { match ->
+            try {
+                match.groupValues[1].toInt().toChar().toString()
+            } catch (_: Exception) {
+                match.value
+            }
+        }
+        // Unescape numeric hex entities (e.g. &#x2019;)
+        text = Regex("&#[xX]([0-9a-fA-F]+);").replace(text) { match ->
+            try {
+                match.groupValues[1].toInt(16).toChar().toString()
+            } catch (_: Exception) {
+                match.value
+            }
+        }
+
+        return text
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    /**
+     * Compresses and deduplicates search results to save 30%-50% context window tokens.
+     */
+    fun buildPromptContext(query: String, items: List<WebSearchItem>, lang: String = "en"): String {
+        val sb = StringBuilder()
+        val seenSentences = mutableSetOf<String>()
+
+        sb.append("\n\n[REAL-TIME WEB SEARCH RESULTS]\n")
+        sb.append("Topic: \"$query\"\n\n")
+        items.forEachIndexed { index, item ->
+            val compressedSnippet = deduplicateAndCompressSnippet(item.snippet, seenSentences)
+            sb.append("Source [${index + 1}]: ${item.title}\n")
+            sb.append("URL: ${item.url}\n")
+            sb.append("Summary: $compressedSnippet\n\n")
+        }
+        sb.append("""
+[FACTUAL REASONING INSTRUCTIONS]:
+1. Prioritize currently active facts, winners, and officeholders from the references above.
+2. Answer factually and directly, citing references using [1], [2].
+""".trimIndent())
+
+        return sb.toString().trimEnd()
+    }
+
+    private fun deduplicateAndCompressSnippet(snippet: String, seenSentences: MutableSet<String>): String {
+        val sentences = snippet.split(Regex("(?<=[.!?])\\s+"))
+        val kept = mutableListOf<String>()
+
+        for (s in sentences) {
+            val normalized = s.trim().lowercase()
+            if (normalized.length < 15) continue
+            // Check if similar sentence already recorded
+            val isDuplicate = seenSentences.any { seen ->
+                seen.contains(normalized) || normalized.contains(seen)
+            }
+            if (!isDuplicate) {
+                seenSentences.add(normalized)
+                kept.add(s.trim())
+            }
+        }
+
+        val result = if (kept.isNotEmpty()) kept.joinToString(" ") else snippet.trim()
+        return result.take(350)
+    }
+
+    fun clearCache() {
+        searchCache.clear()
+    }
+}

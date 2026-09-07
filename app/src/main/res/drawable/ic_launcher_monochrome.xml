@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Monochrome layer is recolored by the launcher — black is the canonical tint. -->
+    <path
+        android:pathData="M33,32 L33,76"
+        android:strokeColor="#000000"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M33,52 L49,34"
+        android:strokeColor="#000000"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M33,52 L49,74"
+        android:strokeColor="#000000"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M58,32 L77,32 L58,48 L77,48"
+        android:strokeColor="#000000"
+        android:strokeWidth="7"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M60,58 L77,58"
+        android:strokeColor="#000000"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M68,52 L68,76"
+        android:strokeColor="#000000"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+</vector>

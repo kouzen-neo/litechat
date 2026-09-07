@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Allow cleartext HTTP:
+    - loopback (127.0.0.1) traffic between apps on the same device
+    - LAN mode (0.0.0.0) so other devices can reach the /v1 endpoint over plain HTTP
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

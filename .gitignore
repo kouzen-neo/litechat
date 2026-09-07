@@ -1,0 +1,53 @@
+# Built application packages & binaries
+*.apk
+*.aab
+*.ap_
+
+# Screen recordings & temporary video captures
+*.mp4
+*.webm
+
+# Java / JVM
+*.class
+
+# Log files
+*.log
+
+# Gradle
+.gradle/
+build/
+*/build/
+.kotlin/
+
+# Local configuration file (sdk.dir, etc)
+local.properties
+
+# Proguard / R8 generated dumps
+proguard/
+
+# Android Studio / IntelliJ IDEA
+*.iml
+.idea/
+.idea/caches
+.idea/libraries
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+
+# CMake / NDK
+.cxx/
+.externalNativeBuild/
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor swaps & temporary files
+*.swp
+*~
