@@ -395,6 +395,7 @@ object RemoteAiClient {
         temperature: Float = 0.7f,
         topP: Float = 0.9f,
         maxTokens: Int = 2048,
+        onUsageTokens: ((completionTokens: Int) -> Unit)? = null,
     ): Flow<String> =
         flow {
             val cleanUrl = baseUrl.trimEnd('/')
@@ -408,6 +409,10 @@ object RemoteAiClient {
                     put("top_p", topP.toDouble())
                     put("max_tokens", maxTokens)
                     put("stream", true)
+                    // Ask for a final usage chunk (completion_tokens) so the
+                    // client can report real token counts. Ignored by
+                    // providers that do not support it.
+                    put("stream_options", JSONObject().put("include_usage", true))
                 }
 
             val reqBuilder =
@@ -454,6 +459,13 @@ object RemoteAiClient {
                                     if (content.isNotEmpty()) {
                                         emit(content)
                                     }
+                                }
+                                // Providers often send a final chunk carrying
+                                // token usage; prefer it over any estimate.
+                                val usage = chunkJson.optJSONObject("usage")
+                                val completionTokens = usage?.optInt("completion_tokens", -1) ?: -1
+                                if (completionTokens >= 0) {
+                                    onUsageTokens?.invoke(completionTokens)
                                 }
                             } catch (e: Exception) {
                                 KLog.d("RemoteAiClient", "Skipping malformed SSE chunk: ${e.message}")

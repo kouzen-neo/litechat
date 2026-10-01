@@ -1690,7 +1690,13 @@ class ChatViewModel(
         isGenerating.value = true
 
         val start = System.currentTimeMillis()
-        var tokenCount = 0
+        // NOTE: tokenCount used to count SSE chunks (one per delta), not
+        // tokens — providers send whole sentences per chunk, so the badge
+        // showed e.g. "17 tokens" for a 400-token reply. Throughput is now
+        // measured from the provider's usage report (falling back to a
+        // length-based estimate) and timed from the first streamed chunk.
+        var firstChunkAt = 0L
+        var usageCompletionTokens: Int? = null
         var promptTokensEstimate = 0
         val targetRemoteChatId = currentConversationId
         var ragSources: List<String>? = null
@@ -1750,9 +1756,12 @@ class ChatViewModel(
                                 temperature = s.temperature,
                                 topP = s.topP,
                                 maxTokens = s.maxTokens,
+                                onUsageTokens = { usageCompletionTokens = it },
                             ),
                         targetChatId = targetRemoteChatId,
-                        onDelta = { tokenCount++ },
+                        onDelta = {
+                            if (firstChunkAt == 0L) firstChunkAt = System.currentTimeMillis()
+                        },
                     )
                 } catch (e: Exception) {
                     // Drop compare state: a failed/cancelled/switched pass 1 must not chain pass 2.
@@ -1771,14 +1780,16 @@ class ChatViewModel(
                     pendingCompareMerge = null
                     if (currentConversationId == targetRemoteChatId) {
                         if (messages.isNotEmpty() && messages.last().role == ChatConstants.ROLE_ASSISTANT) {
-                            val duration = maxOf(0.1f, (System.currentTimeMillis() - start) / 1000f)
-                            val tokSec = tokenCount / duration
-                            val badge = "%.1f tok/s · %d tokens · Remote".format(tokSec, tokenCount)
                             val idx = messages.lastIndex
                             val current = messages[idx]
+                            val outputTokens = usageCompletionTokens ?: estimateTokens(current.content)
+                            val decodeStart = if (firstChunkAt > 0L) firstChunkAt else start
+                            val duration = maxOf(0.1f, (System.currentTimeMillis() - decodeStart) / 1000f)
+                            val tokSec = outputTokens / duration
+                            val badge = "%.1f tok/s · %d tokens · Remote".format(tokSec, outputTokens)
                             val variants = if (current.variants.orEmpty().isEmpty()) listOf(current.content) else current.variants
                             messages[idx] = current.copy(stats = badge, variants = variants, sources = ragSources)
-                            recordRemoteCost(s.remoteModelId, promptTokensEstimate, tokenCount)
+                            recordRemoteCost(s.remoteModelId, promptTokensEstimate, outputTokens)
                         }
                         persist()
                         captureArtifacts(messages.lastOrNull()?.id, messages.lastOrNull()?.content.orEmpty())
