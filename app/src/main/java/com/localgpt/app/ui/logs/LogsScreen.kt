@@ -24,11 +24,13 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import com.localgpt.app.ui.theme.success
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -50,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.localgpt.app.ui.chat.ChatViewModel
+import com.localgpt.app.ui.component.EmptyState
 import java.util.Locale
 
 /**
@@ -183,13 +186,11 @@ fun LogsScreen(
                 modifier = Modifier.fillMaxSize().padding(bottom = 16.dp),
             ) {
                 if (filteredLogs.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(
-                            "No log records found",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    EmptyState(
+                        icon = Icons.Default.Terminal,
+                        title = "No log records found",
+                        message = "Engine telemetry will appear here once the model runs.",
+                    )
                 } else {
                     LazyColumn(
                         state = listState,
@@ -199,9 +200,9 @@ fun LogsScreen(
                         items(filteredLogs) { line ->
                             val color =
                                 when {
-                                    line.contains("ERROR", ignoreCase = true) || line.contains("failed", ignoreCase = true) -> Color(0xFFEF5350)
-                                    line.contains("WARN", ignoreCase = true) -> Color(0xFFFFB74D)
-                                    line.contains("SUCCESS", ignoreCase = true) || line.contains("Ready", ignoreCase = true) -> Color(0xFF81C784)
+                                    line.contains("ERROR", ignoreCase = true) || line.contains("failed", ignoreCase = true) -> MaterialTheme.colorScheme.error
+                                    line.contains("WARN", ignoreCase = true) -> MaterialTheme.colorScheme.tertiary
+                                    line.contains("SUCCESS", ignoreCase = true) || line.contains("Ready", ignoreCase = true) -> MaterialTheme.colorScheme.success
                                     else -> MaterialTheme.colorScheme.onSurface
                                 }
 

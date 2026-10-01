@@ -38,6 +38,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import com.localgpt.app.ui.theme.success
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Surface
@@ -174,14 +175,13 @@ private fun ServerControlCard(viewModel: ChatViewModel) {
                                 Modifier
                                     .size(10.dp)
                                     .clip(CircleShape)
-                                    .background(if (isRunning) Color(0xFF43A047) else MaterialTheme.colorScheme.outlineVariant),
+                                    .background(if (isRunning) MaterialTheme.colorScheme.success else MaterialTheme.colorScheme.outlineVariant),
                         )
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(
                                 if (isRunning) "Server Running ($requestCount requests)" else "Server Stopped",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.titleMedium,
                                 color = if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                             )
                             Text(
@@ -267,7 +267,7 @@ private fun ServerControlCard(viewModel: ChatViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Bind to all network interfaces (LAN)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("Bind to all network interfaces (LAN)", style = MaterialTheme.typography.titleMedium)
                     Text("Allows other devices on your Wi-Fi network to call this endpoint.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(
@@ -496,7 +496,7 @@ private fun ServerLogsCard(viewModel: ChatViewModel) {
                 ) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         recentRequests.takeLast(10).forEach { log ->
-                            val statusColor = if (log.status in 200..299) Color(0xFF81C784) else Color(0xFFEF5350)
+                            val statusColor = if (log.status in 200..299) MaterialTheme.colorScheme.success else MaterialTheme.colorScheme.error
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -554,7 +554,7 @@ private fun BenchmarkCard(viewModel: ChatViewModel) {
             )
 
             // Target Backend Selector
-            Text("Benchmark Target Backend", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text("Benchmark Target Backend", style = MaterialTheme.typography.titleMedium)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

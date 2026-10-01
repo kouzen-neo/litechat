@@ -71,6 +71,7 @@ import com.localgpt.app.localai.LocalAiCatalog
 import com.localgpt.app.localai.LocalAiModel
 import com.localgpt.app.localai.LocalModelDownloader.DownloadState
 import com.localgpt.app.ui.chat.ChatViewModel
+import com.localgpt.app.ui.component.EmptyState
 import com.localgpt.app.ui.component.SettingsTextField
 
 /**
@@ -381,23 +382,11 @@ fun ModelsScreen(
                             )
 
                             if (installedModels.isEmpty()) {
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) {
-                                    Box(
-                                        modifier = Modifier.padding(24.dp),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(
-                                            "No models installed yet. Download a preset below or import a .litertlm file.",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                        )
-                                    }
-                                }
+                                EmptyState(
+                                    icon = Icons.Default.Memory,
+                                    title = "No models installed",
+                                    message = "Download a preset below or import a .litertlm file.",
+                                )
                             } else {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     installedModels.forEach { item ->
@@ -487,10 +476,9 @@ fun ModelsScreen(
                                                                     viewModel.setActiveCustomPath(item.absolutePath)
                                                                 }
                                                             },
-                                                            shape = RoundedCornerShape(10.dp),
-                                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                                            shape = RoundedCornerShape(50),
                                                         ) {
-                                                            Text("Use Model", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                                            Text("Use Model", style = MaterialTheme.typography.labelMedium)
                                                         }
                                                     }
                                                 }

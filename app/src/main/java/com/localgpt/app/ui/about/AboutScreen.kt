@@ -88,7 +88,7 @@ fun AboutScreen(
                     Column {
                         Text(
                             text = "About",
-                            style = MaterialTheme.typography.headlineMedium,
+                            style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
                         )
                         Text(

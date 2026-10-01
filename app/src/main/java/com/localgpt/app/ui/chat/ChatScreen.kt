@@ -162,6 +162,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.localgpt.app.data.ChatMessageEntry
 import com.localgpt.app.ui.component.MarkdownText
+import com.localgpt.app.ui.theme.success
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -414,7 +415,7 @@ fun ChatScreen(
                                 )
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Surface(
-                                        color = if (isModelLoaded || settings.modelSource == ChatConstants.SOURCE_REMOTE) Color(0xFF43A047) else Color(0xFFE53935),
+                                        color = if (isModelLoaded || settings.modelSource == ChatConstants.SOURCE_REMOTE) MaterialTheme.colorScheme.success else MaterialTheme.colorScheme.error,
                                         shape = CircleShape,
                                         modifier = Modifier.size(6.dp),
                                     ) {}
@@ -1608,14 +1609,14 @@ fun ChatScreen(
                     value = urlInput,
                     onValueChange = { urlInput = it },
                     label = { Text("URL") },
-                    placeholder = { Text("https://example.com/artikel") },
+                    placeholder = { Text("https://example.com/article") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth(),
                 )
             },
             confirmButton = {
-                TextButton(
+                Button(
                     onClick = {
                         showUrlDialog = false
                         viewModel.summarizeUrl(urlInput)

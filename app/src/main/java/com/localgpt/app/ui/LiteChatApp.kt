@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Description
@@ -56,6 +57,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import com.localgpt.app.ui.theme.success
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
@@ -165,7 +167,7 @@ fun LiteChatApp(
                         // "Generation Parameters" + "Formatting" merged into one Chat Settings
                         // screen (SamplerScreen already hosts both tabs).
                         DrawerMenuItem(NavRoute.SAMPLER, "Chat Settings", Icons.Filled.Tune, Icons.Outlined.Tune),
-                        DrawerMenuItem(NavRoute.SKILLS, "Skills Hub", Icons.Filled.AutoAwesome, Icons.Filled.AutoAwesome),
+                        DrawerMenuItem(NavRoute.SKILLS, "Skills Hub", Icons.Filled.AutoAwesome, Icons.Outlined.AutoAwesome),
                         DrawerMenuItem(NavRoute.MCP, "MCP Servers", Icons.Filled.Build, Icons.Outlined.Build),
                     )
                 ),
@@ -411,7 +413,7 @@ fun LiteChatApp(
                                             NavRoute.MODELS -> {
                                                 if (isServerRunning) {
                                                     Surface(
-                                                        color = Color(0xFF43A047),
+                                                        color = MaterialTheme.colorScheme.success,
                                                         shape = CircleShape,
                                                         modifier = Modifier.size(8.dp),
                                                     ) {}

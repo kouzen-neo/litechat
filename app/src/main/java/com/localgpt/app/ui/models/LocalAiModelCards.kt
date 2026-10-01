@@ -35,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import com.localgpt.app.ui.theme.success
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -337,21 +338,21 @@ fun InstalledModelCard(
 
                 if (isActive && isLoaded) {
                     Surface(
-                        color = Color(0xFF43A047).copy(alpha = 0.15f),
+                        color = MaterialTheme.colorScheme.success.copy(alpha = 0.15f),
                         shape = RoundedCornerShape(50),
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Surface(color = Color(0xFF43A047), shape = RoundedCornerShape(50)) {
+                            Surface(color = MaterialTheme.colorScheme.success, shape = RoundedCornerShape(50)) {
                                 Spacer(Modifier.size(6.dp))
                             }
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 "Loaded (${activeBackend ?: "RAM"})",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF2E7D32),
+                                color = MaterialTheme.colorScheme.success,
                             )
                         }
                     }

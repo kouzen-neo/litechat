@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,26 +20,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,13 +55,13 @@ import androidx.compose.ui.unit.sp
 import com.localgpt.app.mcp.McpServerConfig
 import com.localgpt.app.mcp.McpTool
 import com.localgpt.app.ui.chat.ChatViewModel
+import com.localgpt.app.ui.component.EmptyState
 
 /**
  * Manages MCP (Model Context Protocol) servers: add/edit/remove, discover
  * tools, and manually test-call a tool. Autonomous tool use during chat is
  * gated behind [ChatViewModel.setMcpEnabled] plus a per-call approval dialog.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun McpScreen(
     viewModel: ChatViewModel,
@@ -79,35 +78,77 @@ fun McpScreen(
     var expandedServer by remember { mutableStateOf<String?>(null) }
     var testTool by remember { mutableStateOf<Pair<McpServerConfig, McpTool>?>(null) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("MCP Servers") },
-                navigationIcon = {
-                    IconButton(onClick = onOpenDrawer) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.refreshMcpTools() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Discover tools")
-                    }
-                },
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(onClick = { showAddDialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "Add server")
-            }
-        },
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(top = 10.dp, start = 16.dp, end = 16.dp),
         ) {
+            // ── 0. Top Header (same pattern as every other screen) ──
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onOpenDrawer,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.Menu,
+                            contentDescription = "Open Menu",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "MCP Servers",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = "${servers.size} Servers",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    IconButton(
+                        onClick = { viewModel.refreshMcpTools() },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "Discover tools",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    IconButton(
+                        onClick = { showAddDialog = true },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "Add server",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(
@@ -142,11 +183,10 @@ fun McpScreen(
 
             if (servers.isEmpty()) {
                 item {
-                    Text(
-                        "No MCP servers yet. Tap + to add one — e.g. a local MCP gateway at http://192.168.1.10:8000/mcp",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 16.dp),
+                    EmptyState(
+                        icon = Icons.Default.Build,
+                        title = "No MCP servers",
+                        message = "Tap + above to add one — e.g. a local MCP gateway at http://192.168.1.10:8000/mcp",
                     )
                 }
             }
@@ -265,6 +305,7 @@ fun McpScreen(
                 )
             }
         }
+        }
     }
 
     if (showAddDialog || editingServer != null) {
@@ -370,7 +411,7 @@ private fun McpServerDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            Button(
                 enabled = canSave,
                 onClick = {
                     val base = initial ?: McpServerConfig(name = "", url = "")
@@ -450,7 +491,7 @@ private fun McpTestCallDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            Button(
                 enabled = !running,
                 onClick = {
                     running = true

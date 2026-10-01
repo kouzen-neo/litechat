@@ -4,6 +4,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.material3.ColorScheme
+import androidx.compose.ui.graphics.luminance
 import com.materialkolor.PaletteStyle
 import com.materialkolor.rememberDynamicColorScheme
 
@@ -38,3 +40,11 @@ fun LiteChatTheme(
         content = content,
     )
 }
+
+/**
+ * Semantic "success / active" green adapted to the current light/dark palette.
+ * Use instead of hardcoded greens so status dots and badges stay legible in
+ * dark and pure-black OLED themes.
+ */
+val ColorScheme.success: Color
+    get() = if (background.luminance() > 0.5f) Color(0xFF2E7D32) else Color(0xFF81C784)

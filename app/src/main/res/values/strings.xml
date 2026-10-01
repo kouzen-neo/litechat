@@ -1,4 +1,8 @@
 <resources>
     <string name="app_name">LiteChat</string>
     <string name="widget_description">Quick-ask LiteChat AI</string>
+    <string name="widget_config_title">Widget prefill text</string>
+    <string name="widget_config_body">This text auto-fills the chat box when the widget button is tapped. Leave empty to open a normal chat.</string>
+    <string name="widget_config_hint">e.g. Explain in simple terms…</string>
+    <string name="widget_config_save">Save</string>
 </resources>

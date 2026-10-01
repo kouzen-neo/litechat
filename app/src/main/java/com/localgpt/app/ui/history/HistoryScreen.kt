@@ -74,6 +74,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.localgpt.app.data.ConversationHeader
 import com.localgpt.app.ui.chat.ChatViewModel
+import com.localgpt.app.ui.component.EmptyState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -430,38 +431,11 @@ fun HistoryScreen(
 
                     if (filteredList.isEmpty()) {
                         item(key = "empty_state") {
-                            Card(
-                                shape = RoundedCornerShape(16.dp),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(32.dp).fillMaxWidth(),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(56.dp),
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                Icons.Default.History,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(28.dp),
-                                            )
-                                        }
-                                    }
-                                    Text(
-                                        text = if (query.isBlank()) "No conversation history" else "No matching chats found",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
+                            EmptyState(
+                                icon = Icons.Default.History,
+                                title = if (query.isBlank()) "No conversation history" else "No matching chats found",
+                                message = if (query.isBlank()) "Start a new chat and it will show up here." else "Try a different search term or filter.",
+                            )
                         }
                     } else {
                         items(filteredList, key = { it.id }) { conv ->
