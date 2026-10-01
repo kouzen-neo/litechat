@@ -58,7 +58,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -512,10 +511,9 @@ internal fun MessageBubble(
                                 decodeSampledBitmapFromFile(File(imagePath), reqSizePx = 1024)
                             }
                     }
-                    // Recycle bitmap when imagePath changes or composable leaves composition
-                    DisposableEffect(bitmap) {
-                        onDispose { bitmap?.recycle() }
-                    }
+                    // NOTE: no manual bitmap.recycle() — the bitmap is still
+                    // referenced by the Image below; racy recycling crashes
+                    // with "Canvas: trying to use a recycled bitmap".
                     // Copy to a local val first: smart cast doesn't work on
                     // delegated properties.
                     val currentBitmap = bitmap

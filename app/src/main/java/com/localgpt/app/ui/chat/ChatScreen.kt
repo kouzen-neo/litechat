@@ -276,6 +276,30 @@ fun ChatScreen(
         rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(maxItems = 5)) { uris ->
             viewModel.addAttachments(uris, forceImage = true)
         }
+    // Legacy fallback for devices without the system photo picker
+    // (no Play Services backport): launching PickVisualMedia there throws
+    // ActivityNotFoundException and kills the app instantly.
+    val imageFallbackLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+            viewModel.addAttachments(uris, forceImage = true)
+        }
+    fun launchImagePicker() {
+        try {
+            if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            } else {
+                imageFallbackLauncher.launch("image/*")
+            }
+        } catch (_: Exception) {
+            try {
+                imageFallbackLauncher.launch("image/*")
+            } catch (_: Exception) {
+                Toast.makeText(context, "No image picker available on this device", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     val filePickerLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) viewModel.addAttachments(listOf(uri))
@@ -701,9 +725,10 @@ fun ChatScreen(
                                                     decodeSampledBitmapFromUri(context.contentResolver, att.uri, reqSizePx = 192)
                                                 }
                                         }
-                                        DisposableEffect(bitmap) {
-                                            onDispose { bitmap?.recycle() }
-                                        }
+                                        // NOTE: no manual bitmap.recycle() here — the decoded
+                                        // bitmap is still referenced by the Image below and
+                                        // recycling it racy-ly crashes with
+                                        // "Canvas: trying to use a recycled bitmap".
                                         val previewBitmap = bitmap
                                         if (previewBitmap != null) {
                                             Box(modifier = Modifier.size(44.dp)) {
@@ -902,9 +927,7 @@ fun ChatScreen(
                                             },
                                             onClick = {
                                                 showAttachmentMenu = false
-                                                photoPickerLauncher.launch(
-                                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                                )
+                                                launchImagePicker()
                                             },
                                         )
                                         DropdownMenuItem(
