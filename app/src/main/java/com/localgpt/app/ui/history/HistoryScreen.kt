@@ -532,7 +532,7 @@ fun HistoryScreen(
                                     if (conv.hasPinnedModel) {
                                         Spacer(Modifier.width(4.dp))
                                         Icon(
-                                            imageVector = PushPin,
+                                            imageVector = Icons.Default.PushPin,
                                             contentDescription = "Pinned model",
                                             tint = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.size(12.dp),

@@ -1010,7 +1010,7 @@ fun ChatScreen(
                                         ) {
                                             if (modelPin != null) {
                                                 Icon(
-                                                    imageVector = PushPin,
+                                                    imageVector = Icons.Default.PushPin,
                                                     contentDescription = "Pinned model",
                                                     tint = MaterialTheme.colorScheme.primary,
                                                     modifier = Modifier.size(12.dp),
@@ -1403,7 +1403,7 @@ fun ChatScreen(
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = CompareArrows,
+                        imageVector = Icons.Default.CompareArrows,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(22.dp),
@@ -1544,7 +1544,7 @@ fun ChatScreen(
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Build,
+                        imageVector = Icons.Default.Build,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(22.dp),
