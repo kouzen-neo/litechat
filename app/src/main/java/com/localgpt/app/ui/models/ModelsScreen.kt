@@ -459,7 +459,7 @@ fun ModelsScreen(
                                                                 if (isLoadingModel) {
                                                                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                                                                 } else {
-                                                                    Text("Load to RAM", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                                                    Text("Load into Memory", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                                                                 }
                                                             }
                                                         }

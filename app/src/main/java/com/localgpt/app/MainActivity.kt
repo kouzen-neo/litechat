@@ -57,8 +57,16 @@ private fun Root(viewModel: ChatViewModel) {
     LiteChatTheme(
         darkTheme = darkTheme,
         pureBlack = settings.pureBlack,
-        themeColor = androidx.compose.ui.graphics.Color(settings.themeColor.toInt()),
+        themeColor = androidx.compose.ui.graphics.Color(
+            settings.themeColor
+                .toString()
+                .toLongOrNull()
+                ?.takeIf { it != 0L }
+                ?: DEFAULT_THEME_COLOR,
+        ),
     ) {
         com.localgpt.app.ui.LiteChatApp(viewModel)
     }
 }
+
+private const val DEFAULT_THEME_COLOR = 0xFF00897BL

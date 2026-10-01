@@ -35,6 +35,7 @@ import com.localgpt.app.util.KLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -187,7 +188,11 @@ class ChatViewModel(
         selectedImageUri.value = null
     }
 
-    private fun persistImageFromUri(uri: Uri): File? {
+    /** Heavy bitmap decode — must not run on the main thread. */
+    private suspend fun persistImageFromUri(uri: Uri): File? =
+        withContext(Dispatchers.IO) { persistImageFromUriBlocking(uri) }
+
+    private fun persistImageFromUriBlocking(uri: Uri): File? {
         return try {
             val imagesDir = File(app.filesDir, "chat_images").apply { if (!exists()) mkdirs() }
             val destFile = File(imagesDir, "img_${System.currentTimeMillis()}.jpg")
@@ -246,6 +251,17 @@ class ChatViewModel(
         map[child.parentId ?: ChatRepository.ROOT_KEY] = id
     }
 
+    /**
+     * Removes the trailing assistant message, if any. Callers must validate
+     * first — removing before validation would wipe the visible response on
+     * failure.
+     */
+    private fun removeTrailingAssistantMessage() {
+        if (messages.isNotEmpty() && messages.last().role == ChatConstants.ROLE_ASSISTANT) {
+            messages.removeAt(messages.lastIndex)
+        }
+    }
+
     private fun rebuildFromTree() {
         val conv = conversation ?: return
         chatRepo.normalize(conv)
@@ -284,7 +300,7 @@ class ChatViewModel(
 
     // ── RAG (Knowledge Documents) ────────────────────────────────────
 
-    private fun ragContext(query: String): Pair<String, List<String>>? =
+    private suspend fun ragContext(query: String): Pair<String, List<String>>? =
         if (settings.value.ragEnabled && query.isNotBlank()) {
             try {
                 rag.retrieve(query, settings.value.useChatMemory)
@@ -775,6 +791,42 @@ class ChatViewModel(
 
     // ── Autonomous Tool Calling Loop (Google AI Edge Architecture) ────
 
+    /**
+     * Collects a stream of text deltas into the trailing assistant message.
+     * UI updates are batched at ~50ms intervals to avoid excessive recomposition.
+     * [onDelta] is invoked for every raw delta (e.g. for token counting).
+     * Collection stops appending if the user switched conversation mid-stream.
+     */
+    private suspend fun collectStreamIntoMessage(
+        deltas: Flow<String>,
+        targetChatId: String?,
+        onDelta: ((String) -> Unit)? = null,
+    ) {
+        var lastEmissionTime = 0L
+        val tokenBuffer = StringBuilder()
+        deltas.collect { delta ->
+            if (currentConversationId != targetChatId) return@collect
+            tokenBuffer.append(delta)
+            onDelta?.invoke(delta)
+            val now = System.currentTimeMillis()
+            if (now - lastEmissionTime >= 50L) {
+                lastEmissionTime = now
+                flushTokenBuffer(tokenBuffer)
+            }
+        }
+        flushTokenBuffer(tokenBuffer)
+    }
+
+    /** Appends the buffered text to the trailing assistant message, if any. */
+    private fun flushTokenBuffer(tokenBuffer: StringBuilder) {
+        if (tokenBuffer.isEmpty()) return
+        val idx = messages.lastIndex
+        if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
+            val current = messages[idx]
+            messages[idx] = current.copy(content = current.content + tokenBuffer.toString())
+            tokenBuffer.setLength(0)
+        }
+    }
 
     private suspend fun handleAutonomousToolCall(
         modelPath: String,
@@ -867,46 +919,26 @@ class ChatViewModel(
             messages[idx] = messages[idx].copy(content = "", sources = updatedSources)
         }
 
-        var lastEmittedTime = 0L
-        val tokenBuffer = StringBuilder()
-
-        engine.streamResponse(
-            prompt = followUpPrompt,
-            params = LiteRtEngineManager.EngineParams(
-                modelPath = modelPath,
-                temperature = s.temperature,
-                topK = s.topK,
-                topP = s.topP,
-                maxTokens = s.maxTokens,
-                contextWindow = s.contextWindowTokens,
-                backend = s.backend,
-                systemPrompt = effectiveSystem,
-                enableThinking = s.enableThinking,
-            ),
-            onMetrics = { onMetricsUpdate(it) },
-        ).collect { delta ->
-            if (currentConversationId != targetChatId) return@collect
-            tokenBuffer.append(delta)
-            val now = System.currentTimeMillis()
-            if (now - lastEmittedTime >= 50L) {
-                lastEmittedTime = now
-                val curIdx = messages.lastIndex
-                if (curIdx >= 0 && messages[curIdx].role == ChatConstants.ROLE_ASSISTANT) {
-                    val toAdd = tokenBuffer.toString()
-                    tokenBuffer.setLength(0)
-                    val cur = messages[curIdx]
-                    messages[curIdx] = cur.copy(content = cur.content + toAdd)
-                }
-            }
-        }
-
-        if (tokenBuffer.isNotEmpty()) {
-            val curIdx = messages.lastIndex
-            if (curIdx >= 0 && messages[curIdx].role == ChatConstants.ROLE_ASSISTANT) {
-                val cur = messages[curIdx]
-                messages[curIdx] = cur.copy(content = cur.content + tokenBuffer.toString())
-            }
-        }
+        collectStreamIntoMessage(
+            deltas =
+                engine.streamResponse(
+                    prompt = followUpPrompt,
+                    params =
+                        LiteRtEngineManager.EngineParams(
+                            modelPath = modelPath,
+                            temperature = s.temperature,
+                            topK = s.topK,
+                            topP = s.topP,
+                            maxTokens = s.maxTokens,
+                            contextWindow = s.contextWindowTokens,
+                            backend = s.backend,
+                            systemPrompt = effectiveSystem,
+                            enableThinking = s.enableThinking,
+                        ),
+                    onMetrics = { onMetricsUpdate(it) },
+                ),
+            targetChatId = targetChatId,
+        )
 
         return updatedSources
     }
@@ -921,147 +953,125 @@ class ChatViewModel(
         isGenerating.value = true
         errorMessage.value = null
         val s = settings.value
-
-        var savedImageFile: File? = null
-        var imageBytes: ByteArray? = null
-        if (currentImageUri != null) {
-            savedImageFile = persistImageFromUri(currentImageUri)
-            imageBytes = savedImageFile?.let { try { it.readBytes() } catch (_: Exception) { null } }
-            clearSelectedImage()
-        }
-
-        val promptText = if (body.isNotBlank()) body else "Describe this image."
-
-        if (s.modelSource == ChatConstants.SOURCE_REMOTE) {
-            sendRemoteMessage(promptText, s)
-            return
-        }
-
-        val modelPath = ChatServerService.resolveModelPath(app, s)
-        if (modelPath == null) {
-            errorMessage.value = "No on-device model found. Please download a model or switch to Remote Provider."
-            isGenerating.value = false
-            return
-        }
-
-        if (conversation == null) conversation = Conversation().also { currentConversationId = it.id }
-        val userEntry =
-            ChatMessageEntry(
-                role = ChatConstants.ROLE_USER,
-                content = promptText,
-                imagePath = savedImageFile?.absolutePath,
-                parentId = messages.lastOrNull()?.id,
-            )
-        messages.add(userEntry)
-        registerActiveChild(userEntry)
-
-        val assistant = ChatMessageEntry(role = ChatConstants.ROLE_ASSISTANT, content = "", parentId = userEntry.id)
-        messages.add(assistant)
-        registerActiveChild(assistant)
-
-        var lastMetrics: LiteRtEngineManager.InferenceMetrics? = null
-        var ragSources: List<String>? = null
-
-        val targetChatId = currentConversationId
         genJob =
             viewModelScope.launch {
-                try {
-                    val activeSummary = runCatching { ensureContextFit(s, modelPath) }.getOrNull()
-                    val appliedWindow = activeSummary != null
-                    val windowed = promptWindowMessages()
-                    val (ragSystem, sources1) = withRagSystem(s.systemPrompt, promptText)
-                    ragSources = sources1
-                    val effectiveSystem = injectSummary(ragSystem, activeSummary, appliedWindow)
-                    val history =
-                        windowed
-                            .dropLast(1)
-                            .map { PromptBuilder.ChatMessage(it.role, it.content) }
-                    val prompt =
-                        PromptBuilder.build(
-                            messages = history,
-                            systemPrompt = effectiveSystem,
-                            templateFormat = s.promptTemplateFormat,
-                            modelPath = modelPath,
-                            enableThinking = s.enableThinking,
-                            contextWindow = s.contextWindowTokens,
-                        )
-                        var lastEmissionTime = 0L
-                        val tokenBuffer = StringBuilder()
+            var savedImageFile: File? = null
+            var imageBytes: ByteArray? = null
+            if (currentImageUri != null) {
+                savedImageFile = persistImageFromUri(currentImageUri)
+                imageBytes = savedImageFile?.let { try { it.readBytes() } catch (_: Exception) { null } }
+                clearSelectedImage()
+            }
 
-                        engine
-                            .streamResponse(
-                                prompt = prompt,
-                                params =
-                                    LiteRtEngineManager.EngineParams(
-                                        modelPath = modelPath,
-                                        temperature = s.temperature,
-                                        topK = s.topK,
-                                        topP = s.topP,
-                                        maxTokens = s.maxTokens,
-                                        contextWindow = s.contextWindowTokens,
-                                        backend = s.backend,
-                                        systemPrompt = effectiveSystem,
-                                        enableThinking = s.enableThinking,
+            val promptText = if (body.isNotBlank()) body else "Describe this image."
+
+            if (s.modelSource == ChatConstants.SOURCE_REMOTE) {
+                sendRemoteMessage(promptText, s)
+                return@launch
+            }
+
+            val modelPath = ChatServerService.resolveModelPath(app, s)
+            if (modelPath == null) {
+                errorMessage.value = "No on-device model found. Please download a model or switch to Remote Provider."
+                isGenerating.value = false
+                return@launch
+            }
+
+            if (conversation == null) conversation = Conversation().also { currentConversationId = it.id }
+            val userEntry =
+                ChatMessageEntry(
+                    role = ChatConstants.ROLE_USER,
+                    content = promptText,
+                    imagePath = savedImageFile?.absolutePath,
+                    parentId = messages.lastOrNull()?.id,
+                )
+            messages.add(userEntry)
+            registerActiveChild(userEntry)
+
+            val assistant = ChatMessageEntry(role = ChatConstants.ROLE_ASSISTANT, content = "", parentId = userEntry.id)
+            messages.add(assistant)
+            registerActiveChild(assistant)
+
+            var lastMetrics: LiteRtEngineManager.InferenceMetrics? = null
+            var ragSources: List<String>? = null
+
+            val targetChatId = currentConversationId
+            genJob =
+                viewModelScope.launch {
+                    try {
+                        val activeSummary = runCatching { ensureContextFit(s, modelPath) }.getOrNull()
+                        val appliedWindow = activeSummary != null
+                        val windowed = promptWindowMessages()
+                        val (ragSystem, sources1) = withRagSystem(s.systemPrompt, promptText)
+                        ragSources = sources1
+                        val effectiveSystem = injectSummary(ragSystem, activeSummary, appliedWindow)
+                        val history =
+                            windowed
+                                .dropLast(1)
+                                .map { PromptBuilder.ChatMessage(it.role, it.content) }
+                        val prompt =
+                            PromptBuilder.build(
+                                messages = history,
+                                systemPrompt = effectiveSystem,
+                                templateFormat = s.promptTemplateFormat,
+                                modelPath = modelPath,
+                                enableThinking = s.enableThinking,
+                                contextWindow = s.contextWindowTokens,
+                            )
+                            collectStreamIntoMessage(
+                                deltas =
+                                    engine.streamResponse(
+                                        prompt = prompt,
+                                        params =
+                                            LiteRtEngineManager.EngineParams(
+                                                modelPath = modelPath,
+                                                temperature = s.temperature,
+                                                topK = s.topK,
+                                                topP = s.topP,
+                                                maxTokens = s.maxTokens,
+                                                contextWindow = s.contextWindowTokens,
+                                                backend = s.backend,
+                                                systemPrompt = effectiveSystem,
+                                                enableThinking = s.enableThinking,
+                                            ),
+                                        imagePath = savedImageFile?.absolutePath,
+                                        imageBytes = imageBytes,
+                                        onMetrics = { lastMetrics = it },
                                     ),
-                                imagePath = savedImageFile?.absolutePath,
-                                imageBytes = imageBytes,
-                                onMetrics = { metrics ->
-                                    lastMetrics = metrics
-                                },
-                            ).collect { delta ->
-                                if (currentConversationId != targetChatId) return@collect
-                                tokenBuffer.append(delta)
-                                val now = System.currentTimeMillis()
-                                if (now - lastEmissionTime >= 50L) {
-                                    lastEmissionTime = now
-                                    val idx = messages.lastIndex
-                                    if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                                        val toAdd = tokenBuffer.toString()
-                                        tokenBuffer.setLength(0)
-                                        val current = messages[idx]
-                                        messages[idx] = current.copy(content = current.content + toAdd)
-                                    }
-                                }
-                            }
+                                targetChatId = targetChatId,
+                            )
 
-                        if (tokenBuffer.isNotEmpty()) {
-                            val idx = messages.lastIndex
-                            if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
+                        ragSources = handleAutonomousToolCall(
+                            modelPath = modelPath,
+                            s = s,
+                            targetChatId = targetChatId,
+                            history = history,
+                            effectiveSystem = effectiveSystem,
+                            currentSources = ragSources,
+                            onMetricsUpdate = { lastMetrics = it },
+                        )
+                    } catch (e: Exception) {
+                        if (e is CancellationException || currentConversationId != targetChatId) return@launch
+                        KLog.e("ChatVM", "Generation failed", e)
+                        if (messages.lastOrNull()?.content?.isBlank() == true) {
+                            messages.removeAt(messages.lastIndex)
+                        }
+                        errorMessage.value = "Generation failed: ${e.message ?: e.javaClass.simpleName}"
+                    } finally {
+                        if (currentConversationId == targetChatId) {
+                            isGenerating.value = false
+                            if (lastMetrics != null && messages.isNotEmpty() && messages.last().role == ChatConstants.ROLE_ASSISTANT) {
+                                val idx = messages.lastIndex
                                 val current = messages[idx]
-                                messages[idx] = current.copy(content = current.content + tokenBuffer.toString())
+                                val variants = if (current.variants.orEmpty().isEmpty()) listOf(current.content) else current.variants
+                                messages[idx] = current.copy(stats = lastMetrics.displayBadge, variants = variants, sources = ragSources)
                             }
+                            persist()
+                            captureArtifacts(messages.lastOrNull()?.id, messages.lastOrNull()?.content.orEmpty())
                         }
-
-                    ragSources = handleAutonomousToolCall(
-                        modelPath = modelPath,
-                        s = s,
-                        targetChatId = targetChatId,
-                        history = history,
-                        effectiveSystem = effectiveSystem,
-                        currentSources = ragSources,
-                        onMetricsUpdate = { lastMetrics = it },
-                    )
-                } catch (e: Exception) {
-                    if (e is CancellationException || currentConversationId != targetChatId) return@launch
-                    KLog.e("ChatVM", "Generation failed", e)
-                    if (messages.lastOrNull()?.content?.isBlank() == true) {
-                        messages.removeAt(messages.lastIndex)
-                    }
-                    errorMessage.value = "Generation failed: ${e.message ?: e.javaClass.simpleName}"
-                } finally {
-                    if (currentConversationId == targetChatId) {
-                        isGenerating.value = false
-                        if (lastMetrics != null && messages.isNotEmpty() && messages.last().role == ChatConstants.ROLE_ASSISTANT) {
-                            val idx = messages.lastIndex
-                            val current = messages[idx]
-                            val variants = if (current.variants.orEmpty().isEmpty()) listOf(current.content) else current.variants
-                            messages[idx] = current.copy(stats = lastMetrics.displayBadge, variants = variants, sources = ragSources)
-                        }
-                        persist()
-                        captureArtifacts(messages.lastOrNull()?.id, messages.lastOrNull()?.content.orEmpty())
                     }
                 }
-            }
+        }
     }
 
     private fun sendRemoteMessage(body: String, s: Settings) {
@@ -1071,15 +1081,26 @@ class ChatViewModel(
         }
         if (conversation == null) conversation = Conversation().also { currentConversationId = it.id }
 
-        val branchQuery = body.ifBlank { messages.lastOrNull { it.role == ChatConstants.ROLE_USER }?.content ?: "" }
+        // Regenerate/edit flows pass a blank body to reuse the existing user
+        // message — don't append an empty user node in that case.
         val userEntry =
-            ChatMessageEntry(
-                role = ChatConstants.ROLE_USER,
-                content = body,
-                parentId = messages.lastOrNull()?.id,
-            )
-        messages.add(userEntry)
-        registerActiveChild(userEntry)
+            if (body.isBlank()) {
+                messages.lastOrNull { it.role == ChatConstants.ROLE_USER }
+                    ?: run {
+                        errorMessage.value = "No user message to regenerate."
+                        return
+                    }
+            } else {
+                ChatMessageEntry(
+                    role = ChatConstants.ROLE_USER,
+                    content = body,
+                    parentId = messages.lastOrNull()?.id,
+                ).also {
+                    messages.add(it)
+                    registerActiveChild(it)
+                }
+            }
+        val branchQuery = userEntry.content
 
         val assistant = ChatMessageEntry(role = ChatConstants.ROLE_ASSISTANT, content = "", parentId = userEntry.id)
         messages.add(assistant)
@@ -1116,24 +1137,20 @@ class ChatViewModel(
                         historyMap.add(mapOf("role" to it.role, "content" to it.content))
                     }
 
-                    RemoteAiClient
-                        .streamChat(
-                            baseUrl = s.remoteBaseUrl,
-                            apiKey = s.remoteApiKey,
-                            model = s.remoteModelId,
-                            messages = historyMap,
-                            temperature = s.temperature,
-                            topP = s.topP,
-                            maxTokens = s.maxTokens,
-                        ).collect { delta ->
-                            if (currentConversationId != targetRemoteChatId) return@collect
-                            val idx = messages.lastIndex
-                            if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                                val current = messages[idx]
-                                messages[idx] = current.copy(content = current.content + delta)
-                            }
-                            tokenCount++
-                        }
+                    collectStreamIntoMessage(
+                        deltas =
+                            RemoteAiClient.streamChat(
+                                baseUrl = s.remoteBaseUrl,
+                                apiKey = s.remoteApiKey,
+                                model = s.remoteModelId,
+                                messages = historyMap,
+                                temperature = s.temperature,
+                                topP = s.topP,
+                                maxTokens = s.maxTokens,
+                            ),
+                        targetChatId = targetRemoteChatId,
+                        onDelta = { tokenCount++ },
+                    )
                 } catch (e: Exception) {
                     if (e is CancellationException || currentConversationId != targetRemoteChatId) return@launch
                     KLog.e("ChatVM", "Remote generation failed", e)
@@ -1232,48 +1249,28 @@ class ChatViewModel(
                             enableThinking = s.enableThinking,
                             contextWindow = s.contextWindowTokens,
                         )
-                        var lastEmissionTime = 0L
-                        val tokenBuffer = StringBuilder()
-
-                        engine
-                            .streamResponse(
-                                prompt = prompt,
-                                params =
-                                    LiteRtEngineManager.EngineParams(
-                                        modelPath = modelPath,
-                                        temperature = s.temperature,
-                                        topK = s.topK,
-                                        topP = s.topP,
-                                        maxTokens = s.maxTokens,
-                                        contextWindow = s.contextWindowTokens,
-                                        backend = s.backend,
-                                        systemPrompt = effectiveSystem,
-                                        enableThinking = s.enableThinking,
-                                    ),
-                                imagePath = oldMsg.imagePath,
-                                imageBytes = imageBytes,
-                                onMetrics = { lastMetrics = it },
-                            ).collect { delta ->
-                                if (currentConversationId != targetChatId) return@collect
-                                tokenBuffer.append(delta)
-                                val now = System.currentTimeMillis()
-                                if (now - lastEmissionTime >= 50L) {
-                                    lastEmissionTime = now
-                                    val idx = messages.lastIndex
-                                    if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                                        val toAdd = tokenBuffer.toString()
-                                        tokenBuffer.setLength(0)
-                                        messages[idx] = messages[idx].copy(content = messages[idx].content + toAdd)
-                                    }
-                                }
-                            }
-
-                        if (tokenBuffer.isNotEmpty()) {
-                            val idx = messages.lastIndex
-                            if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                                messages[idx] = messages[idx].copy(content = messages[idx].content + tokenBuffer.toString())
-                            }
-                        }
+                        collectStreamIntoMessage(
+                            deltas =
+                                engine.streamResponse(
+                                    prompt = prompt,
+                                    params =
+                                        LiteRtEngineManager.EngineParams(
+                                            modelPath = modelPath,
+                                            temperature = s.temperature,
+                                            topK = s.topK,
+                                            topP = s.topP,
+                                            maxTokens = s.maxTokens,
+                                            contextWindow = s.contextWindowTokens,
+                                            backend = s.backend,
+                                            systemPrompt = effectiveSystem,
+                                            enableThinking = s.enableThinking,
+                                        ),
+                                    imagePath = oldMsg.imagePath,
+                                    imageBytes = imageBytes,
+                                    onMetrics = { lastMetrics = it },
+                                ),
+                            targetChatId = targetChatId,
+                        )
 
                     ragSources = handleAutonomousToolCall(
                         modelPath = modelPath,
@@ -1319,13 +1316,17 @@ class ChatViewModel(
             existingVariants.add(lastAssistant.content)
         }
 
-        if (messages.last().role == ChatConstants.ROLE_ASSISTANT) {
-            messages.removeAt(messages.lastIndex)
-        }
         val lastUser = messages.lastOrNull { it.role == ChatConstants.ROLE_USER } ?: return
         val s = settings.value
 
+        // Validate before touching the message list: a failed validation must
+        // not wipe the currently visible response.
         if (s.modelSource == ChatConstants.SOURCE_REMOTE) {
+            if (s.remoteBaseUrl.isBlank() || s.remoteModelId.isBlank()) {
+                errorMessage.value = "Please configure Remote Base URL and select a model in Models tab."
+                return
+            }
+            removeTrailingAssistantMessage()
             sendRemoteMessage("", s)
             return
         }
@@ -1335,6 +1336,7 @@ class ChatViewModel(
             errorMessage.value = "No model found to regenerate response."
             return
         }
+        removeTrailingAssistantMessage()
 
         val imageBytes =
             lastUser.imagePath?.let { path ->
@@ -1370,48 +1372,28 @@ class ChatViewModel(
                             enableThinking = s.enableThinking,
                             contextWindow = s.contextWindowTokens,
                         )
-                        var lastEmissionTime = 0L
-                        val tokenBuffer = StringBuilder()
-
-                        engine
-                            .streamResponse(
-                                prompt = prompt,
-                                params =
-                                    LiteRtEngineManager.EngineParams(
-                                        modelPath = modelPath,
-                                        temperature = s.temperature,
-                                        topK = s.topK,
-                                        topP = s.topP,
-                                        maxTokens = s.maxTokens,
-                                        contextWindow = s.contextWindowTokens,
-                                        backend = s.backend,
-                                        systemPrompt = effectiveSystem,
-                                        enableThinking = s.enableThinking,
-                                    ),
-                                imagePath = lastUser.imagePath,
-                                imageBytes = imageBytes,
-                                onMetrics = { lastMetrics = it },
-                            ).collect { delta ->
-                                if (currentConversationId != targetRegenChatId) return@collect
-                                tokenBuffer.append(delta)
-                                val now = System.currentTimeMillis()
-                                if (now - lastEmissionTime >= 50L) {
-                                    lastEmissionTime = now
-                                    val idx = messages.lastIndex
-                                    if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                                        val toAdd = tokenBuffer.toString()
-                                        tokenBuffer.setLength(0)
-                                        messages[idx] = messages[idx].copy(content = messages[idx].content + toAdd)
-                                    }
-                                }
-                            }
-
-                        if (tokenBuffer.isNotEmpty()) {
-                            val idx = messages.lastIndex
-                            if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                                messages[idx] = messages[idx].copy(content = messages[idx].content + tokenBuffer.toString())
-                            }
-                        }
+                        collectStreamIntoMessage(
+                            deltas =
+                                engine.streamResponse(
+                                    prompt = prompt,
+                                    params =
+                                        LiteRtEngineManager.EngineParams(
+                                            modelPath = modelPath,
+                                            temperature = s.temperature,
+                                            topK = s.topK,
+                                            topP = s.topP,
+                                            maxTokens = s.maxTokens,
+                                            contextWindow = s.contextWindowTokens,
+                                            backend = s.backend,
+                                            systemPrompt = effectiveSystem,
+                                            enableThinking = s.enableThinking,
+                                        ),
+                                    imagePath = lastUser.imagePath,
+                                    imageBytes = imageBytes,
+                                    onMetrics = { lastMetrics = it },
+                                ),
+                            targetChatId = targetRegenChatId,
+                        )
 
                     ragSources = handleAutonomousToolCall(
                         modelPath = modelPath,

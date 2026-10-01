@@ -42,29 +42,31 @@ object RemoteAiClient {
                 }
 
                 val response = client.newCall(reqBuilder.build()).execute()
-                if (!response.isSuccessful) {
-                    return@withContext Result.failure(Exception("HTTP ${response.code}: ${response.message}"))
-                }
-
-                val body = response.body?.string() ?: "{}"
-                val json = JSONObject(body)
-                val dataArray = json.optJSONArray("data") ?: JSONArray()
-                val models = mutableListOf<RemoteModelItem>()
-                for (i in 0 until dataArray.length()) {
-                    val obj = dataArray.getJSONObject(i)
-                    val id = obj.optString("id", "")
-                    if (id.isNotBlank()) {
-                        models.add(
-                            RemoteModelItem(
-                                id = id,
-                                name = id,
-                                provider = "Remote",
-                                description = "Remote model on $cleanUrl",
-                            ),
-                        )
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        return@withContext Result.failure(Exception("HTTP ${resp.code}: ${resp.message}"))
                     }
+
+                    val body = resp.body?.string() ?: "{}"
+                    val json = JSONObject(body)
+                    val dataArray = json.optJSONArray("data") ?: JSONArray()
+                    val models = mutableListOf<RemoteModelItem>()
+                    for (i in 0 until dataArray.length()) {
+                        val obj = dataArray.getJSONObject(i)
+                        val id = obj.optString("id", "")
+                        if (id.isNotBlank()) {
+                            models.add(
+                                RemoteModelItem(
+                                    id = id,
+                                    name = id,
+                                    provider = "Remote",
+                                    description = "Remote model on $cleanUrl",
+                                ),
+                            )
+                        }
+                    }
+                    Result.success(models)
                 }
-                Result.success(models)
             } catch (e: Exception) {
                 KLog.e("RemoteAiClient", "Failed to fetch models: ${e.message}", e)
                 Result.failure(e)
@@ -113,34 +115,41 @@ object RemoteAiClient {
             }
 
             val response = client.newCall(reqBuilder.build()).execute()
-            if (!response.isSuccessful) {
-                throw IllegalStateException("Remote server error: HTTP ${response.code} (${response.message})")
-            }
-
-            val reader = response.body?.byteStream()?.bufferedReader() ?: return@flow
             try {
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    val trimmed = line.trim()
-                    if (trimmed.startsWith("data: ")) {
-                        val data = trimmed.removePrefix("data: ").trim()
-                        if (data == "[DONE]") break
-                        try {
-                            val chunkJson = JSONObject(data)
-                            val choices = chunkJson.optJSONArray("choices")
-                            if (choices != null && choices.length() > 0) {
-                                val delta = choices.getJSONObject(0).optJSONObject("delta")
-                                val content = delta?.optString("content", "") ?: ""
-                                if (content.isNotEmpty()) {
-                                    emit(content)
+                if (!response.isSuccessful) {
+                    throw IllegalStateException("Remote server error: HTTP ${response.code} (${response.message})")
+                }
+
+                val reader = response.body?.byteStream()?.bufferedReader() ?: return@flow
+                try {
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        val trimmed = line.trim()
+                        if (trimmed.startsWith("data:")) {
+                            val data =
+                                trimmed.removePrefix("data:").let {
+                                    if (it.startsWith(" ") || it.startsWith("\t")) it.drop(1) else it
                                 }
+                            if (data == "[DONE]") break
+                            try {
+                                val chunkJson = JSONObject(data)
+                                val choices = chunkJson.optJSONArray("choices")
+                                if (choices != null && choices.length() > 0) {
+                                    val delta = choices.getJSONObject(0).optJSONObject("delta")
+                                    val content = delta?.optString("content", "") ?: ""
+                                    if (content.isNotEmpty()) {
+                                        emit(content)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                KLog.d("RemoteAiClient", "Skipping malformed SSE chunk: ${e.message}")
                             }
-                        } catch (_: Exception) {
                         }
                     }
+                } finally {
+                    reader.close()
                 }
             } finally {
-                reader.close()
                 response.close()
             }
         }.flowOn(Dispatchers.IO)

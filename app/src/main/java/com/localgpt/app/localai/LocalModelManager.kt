@@ -32,6 +32,44 @@ data class InstalledModel(
 class LocalModelManager(
     private val context: Context,
 ) {
+    companion object {
+        /** Model file extensions the app can actually load. */
+        val ALLOWED_MODEL_EXTENSIONS = setOf("litertlm", "task", "bin", "tflite")
+
+        /**
+         * Sanitizes a user-supplied file name so it can never escape [modelsDir]
+         * (path traversal) and always carries an allowed model extension.
+         *
+         * @return the safe file name, or null when the name has no usable
+         * basename or a disallowed extension.
+         */
+        fun sanitizeModelFileNameOrNull(raw: String): String? {
+            // Strip any directory components (both separators) and whitespace.
+            val base = raw.substringAfterLast('/').substringAfterLast('\\').trim()
+            // Keep only a conservative safe charset.
+            var name = base.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            // Collapse dot runs (".." tricks) and strip leading/trailing dots
+            // so names like ".litertlm" or "..." can never slip through.
+            while (".." in name) name = name.replace("..", ".")
+            name = name.trim('.')
+            if (name.length > 128) name = name.take(128)
+            val dot = name.lastIndexOf('.')
+            if (dot <= 0 || dot == name.length - 1) return null
+            val ext = name.substring(dot + 1).lowercase()
+            if (ext !in ALLOWED_MODEL_EXTENSIONS) return null
+            return name
+        }
+
+        /**
+         * Like [sanitizeModelFileNameOrNull] but falls back to [fallback]
+         * instead of returning null.
+         */
+        fun sanitizeModelFileName(
+            raw: String,
+            fallback: String = "custom_model.litertlm",
+        ): String = sanitizeModelFileNameOrNull(raw) ?: fallback
+    }
+
     val modelsDir: File
         get() {
             val dir = context.getExternalFilesDir("models") ?: File(context.filesDir, "models")
@@ -54,8 +92,10 @@ class LocalModelManager(
     fun deleteModel(model: LocalAiModel): Boolean = deleteFile(model.fileName)
 
     fun deleteFile(fileName: String): Boolean {
-        val file = File(modelsDir, fileName)
-        val tmp = File(modelsDir, "$fileName.tmp")
+        val safeName = sanitizeModelFileName(fileName, fallback = "")
+        if (safeName.isBlank()) return false
+        val file = File(modelsDir, safeName)
+        val tmp = File(modelsDir, "$safeName.tmp")
         if (tmp.exists()) tmp.delete()
         return if (file.exists()) {
             file.delete()
@@ -65,7 +105,8 @@ class LocalModelManager(
     }
 
     /**
-     * Scans the models directory and returns all downloaded model files (.litertlm, .task, .bin).
+     * Scans the models directory and returns all downloaded model files
+     * (.litertlm, .task, .bin, .tflite).
      * Automatically maps recognized filenames to PresetModels if available.
      */
     fun getInstalledModels(): List<InstalledModel> =
@@ -75,11 +116,7 @@ class LocalModelManager(
                     f.isFile &&
                         !f.name.endsWith(".tmp", ignoreCase = true) &&
                         f.length() > 0 &&
-                        (
-                            f.name.endsWith(".litertlm", ignoreCase = true) ||
-                                f.name.endsWith(".task", ignoreCase = true) ||
-                                f.name.endsWith(".bin", ignoreCase = true)
-                        )
+                        f.name.substringAfterLast('.', "").lowercase() in ALLOWED_MODEL_EXTENSIONS
                 } ?: emptyArray()
 
             files
@@ -102,6 +139,7 @@ class LocalModelManager(
                                 .removeSuffix(".litertlm")
                                 .removeSuffix(".task")
                                 .removeSuffix(".bin")
+                                .removeSuffix(".tflite")
                                 .replace("_", " ")
                                 .replace("-", " ")
                         }
@@ -129,19 +167,22 @@ class LocalModelManager(
         }
 
     /**
-     * Imports a user-selected .litertlm, .task, or .bin model file from a Content Uri.
+     * Imports a user-selected model file (.litertlm, .task, .bin, .tflite) from a
+     * Content Uri. The display name is sanitized to block path traversal and
+     * restricted to allowed model extensions.
      * Returns the absolute path of the imported model file, or null on failure.
      */
     suspend fun importCustomModel(uri: Uri): String? =
         withContext(Dispatchers.IO) {
             try {
-                var fileName = "custom_model.litertlm"
+                var rawName = "custom_model.litertlm"
                 context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                     val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (nameIndex != -1 && cursor.moveToFirst()) {
-                        fileName = cursor.getString(nameIndex) ?: "custom_model.litertlm"
+                        rawName = cursor.getString(nameIndex) ?: "custom_model.litertlm"
                     }
                 }
+                val fileName = sanitizeModelFileNameOrNull(rawName) ?: return@withContext null
 
                 val targetFile = File(modelsDir, fileName)
                 context.contentResolver.openInputStream(uri)?.use { input ->

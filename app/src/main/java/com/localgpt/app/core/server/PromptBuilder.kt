@@ -23,8 +23,10 @@ object PromptBuilder {
         enableThinking: Boolean = true,
         contextWindow: Int = 4096,
     ): String {
+        // Per OpenAI semantics the system message comes first; when several
+        // system messages are present, the first one wins.
         var system =
-            messages.lastOrNull { it.role.equals(ChatConstants.ROLE_SYSTEM, ignoreCase = true) }?.content?.trim()
+            messages.firstOrNull { it.role.equals(ChatConstants.ROLE_SYSTEM, ignoreCase = true) }?.content?.trim()
                 .takeUnless { it.isNullOrBlank() } ?: systemPrompt.trim()
 
         if (!enableThinking) {
@@ -39,12 +41,11 @@ object PromptBuilder {
                 content = content.replace(Regex("<(think|thought)>[\\s\\S]*?</(think|thought)>"), "").trim()
             }
             if (msg.role.equals(ChatConstants.ROLE_USER, ignoreCase = true)) {
-                if (content.startsWith("/search", ignoreCase = true) || content.startsWith("/web", ignoreCase = true)) {
-                    val clean = content.removePrefix("/search").removePrefix("/Search")
-                        .removePrefix("/web").removePrefix("/Web").trim()
-                    if (clean.isNotBlank()) {
-                        content = clean
-                    }
+                // Strip a leading /search or /web command prefix (case-insensitive,
+                // only when followed by whitespace or end-of-input).
+                val clean = content.replaceFirst(Regex("^/(search|web)(?=\\s|$)", RegexOption.IGNORE_CASE), "").trim()
+                if (clean.isNotBlank()) {
+                    content = clean
                 }
             }
             msg.copy(content = content)

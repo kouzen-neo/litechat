@@ -117,7 +117,8 @@ fun LocalAiParametersTab(
             value = settings.temperature,
             valueDisplay = String.format(Locale.ROOT, "%.2f", settings.temperature),
             description = "Low values (0.1 - 0.3) provide factual, consistent responses. Higher values (0.7 - 0.9) increase creativity.",
-            range = 0.0f..1.0f,
+            range = 0.0f..2.0f,
+            steps = 20,
             onValueChange = onUpdateTemperature,
         )
 
@@ -516,6 +517,7 @@ private fun ParameterSlider(
     valueDisplay: String,
     description: String,
     range: ClosedFloatingPointRange<Float>,
+    steps: Int = 0,
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -559,6 +561,7 @@ private fun ParameterSlider(
                 value = value,
                 onValueChange = onValueChange,
                 valueRange = range,
+                steps = steps,
                 modifier = Modifier.fillMaxWidth(),
             )
         }

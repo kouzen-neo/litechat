@@ -1,4 +1,5 @@
 package com.localgpt.app.ui.settings
+import com.localgpt.app.BuildConfig
 import com.localgpt.app.data.ChatConstants
 
 import android.content.Intent
@@ -335,7 +336,7 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.primaryContainer,
                             ) {
                                 Text(
-                                    "v1.0.0",
+                                    "v${BuildConfig.VERSION_NAME}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer,

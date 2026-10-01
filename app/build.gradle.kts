@@ -5,7 +5,9 @@ plugins {
 
 android {
     namespace = "com.localgpt.app"
-    compileSdk = 37
+    // TODO: bump back to 37 once Google publishes the android-37 SDK platform
+    // (public repo only has up to android-36 as of 2026-10-01).
+    compileSdk = 36
 
     // -PabiFilter=arm64-v8a -> single-ABI APK; without flag -> all ABIs + universal
     val abiFilter =
@@ -44,9 +46,24 @@ android {
     signingConfigs {
         create("release") {
             storeFile = file("release.keystore")
-            storePassword = "localgpt123"
-            keyAlias = "localgpt"
-            keyPassword = "localgpt123"
+            // Passwords are intentionally NOT hardcoded: read from environment first,
+            // then gradle.properties / local.properties (never commit those files).
+            val ksStorePw = System.getenv("LITECHAT_KEYSTORE_STORE_PASSWORD")
+                ?: (project.findProperty("litechat.keystore.storePassword") as String?)
+            val ksKeyPw = System.getenv("LITECHAT_KEYSTORE_KEY_PASSWORD")
+                ?: (project.findProperty("litechat.keystore.keyPassword") as String?)
+            if (ksStorePw.isNullOrEmpty() || ksKeyPw.isNullOrEmpty()) {
+                logger.warn(
+                    "Keystore passwords not set (LITECHAT_KEYSTORE_STORE_PASSWORD / " +
+                        "LITECHAT_KEYSTORE_KEY_PASSWORD env or litechat.keystore.* gradle properties). " +
+                        "Release signing will fail until they are provided."
+                )
+            }
+            storePassword = ksStorePw
+            keyAlias = System.getenv("LITECHAT_KEYSTORE_KEY_ALIAS")
+                ?: (project.findProperty("litechat.keystore.keyAlias") as String?)
+                ?: "localgpt"
+            keyPassword = ksKeyPw
         }
     }
 
@@ -122,6 +139,9 @@ dependencies {
 
     // DataStore (settings)
     implementation("androidx.datastore:datastore-preferences:1.1.2")
+
+    // EncryptedSharedPreferences (sensitive tokens: API keys, HF token, server auth)
+    implementation("androidx.security:security-crypto:1.0.0")
 
     // JSON + HTTP client (model downloads from HuggingFace)
     implementation("com.google.code.gson:gson:2.11.0")

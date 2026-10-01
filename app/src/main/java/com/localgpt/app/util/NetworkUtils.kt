@@ -36,6 +36,20 @@ object NetworkUtils {
         }
     }
     /**
+     * True for RFC 1918 private LAN addresses. Note that 172.0.0.0–172.15.x.x
+     * and 172.32.0.0–172.255.x.x are public ranges, so a bare "172." prefix
+     * check would wrongly classify them as LAN addresses.
+     */
+    private fun isPrivateLanAddress(host: String): Boolean {
+        if (host.startsWith("192.168.") || host.startsWith("10.")) return true
+        if (host.startsWith("172.")) {
+            val second = host.substringAfter("172.").substringBefore(".").toIntOrNull() ?: return false
+            return second in 16..31
+        }
+        return false
+    }
+
+    /**
      * Attempts to resolve the active local IPv4 address (Wi-Fi, Ethernet, Hotspot, or LAN).
      * Returns null if no suitable LAN interface is found.
      */
@@ -51,7 +65,7 @@ object NetworkUtils {
                     if (!addr.isLoopbackAddress && addr is Inet4Address) {
                         val host = addr.hostAddress ?: continue
                         // Prioritize common local private subnets
-                        if (host.startsWith("192.168.") || host.startsWith("10.") || host.startsWith("172.")) {
+                        if (isPrivateLanAddress(host)) {
                             // Wi-Fi or Ethernet interfaces take top priority
                             if (name.startsWith("wlan") || name.startsWith("eth") || name.startsWith("rndis") || name.startsWith("ap")) {
                                 return host

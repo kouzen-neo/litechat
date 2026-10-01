@@ -99,8 +99,6 @@ fun CharactersScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf("All") }
-    var showCreateDialog by remember { mutableStateOf(false) }
-    var showImportDialog by remember { mutableStateOf(false) }
     var editingPersona by remember { mutableStateOf<PersonaPreset?>(null) }
 
     // Quick inline form state for Create Tab
@@ -466,26 +464,6 @@ fun CharactersScreen(
         }
     }
 
-    // ── Create Character Dialog ──
-    if (showCreateDialog) {
-        CharacterEditorDialog(
-            initialPersona = null,
-            onDismiss = { showCreateDialog = false },
-            onSave = { name, iconType, prompt, greeting, temp, topK ->
-                viewModel.addCustomPersona(
-                    name = name,
-                    iconType = iconType,
-                    systemPrompt = prompt,
-                    greeting = greeting,
-                    temperature = temp,
-                    topK = topK,
-                )
-                showCreateDialog = false
-                Toast.makeText(context, "Character '$name' created!", Toast.LENGTH_SHORT).show()
-            },
-        )
-    }
-
     // ── Edit Character Dialog ──
     editingPersona?.let { persona ->
         CharacterEditorDialog(
@@ -502,55 +480,6 @@ fun CharactersScreen(
                 )
                 editingPersona = null
                 Toast.makeText(context, "Character '$name' updated!", Toast.LENGTH_SHORT).show()
-            },
-        )
-    }
-
-    // ── Import JSON Dialog ──
-    if (showImportDialog) {
-        var importInput by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showImportDialog = false },
-            icon = { Icon(Icons.Default.FileUpload, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-            title = { Text("Import Character JSON") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Paste Character Card v2 or LiteChat Persona JSON:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedTextField(
-                        value = importInput,
-                        onValueChange = { importInput = it },
-                        label = { Text("JSON Content") },
-                        minLines = 4,
-                        maxLines = 10,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val ok = viewModel.importPersonaFromJson(importInput.trim())
-                        if (ok) {
-                            showImportDialog = false
-                            Toast.makeText(context, "Character imported successfully!", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "Invalid JSON format", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    enabled = importInput.isNotBlank(),
-                ) {
-                    Text("Import")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showImportDialog = false }) {
-                    Text("Cancel")
-                }
             },
         )
     }
@@ -792,7 +721,7 @@ private fun CharacterEditorDialog(
     var prompt by remember { mutableStateOf(initialPersona?.systemPrompt ?: "") }
     var greeting by remember { mutableStateOf(initialPersona?.greeting ?: "") }
     var iconType by remember { mutableStateOf(initialPersona?.iconType ?: "custom") }
-    var tempSlider by remember { mutableFloatStateOf(initialPersona?.temperature ?: 0.7f) }
+    var tempSlider by remember { mutableFloatStateOf((initialPersona?.temperature ?: 0.7f).coerceIn(0f, 2f)) }
     var useSpecificSampler by remember { mutableStateOf(initialPersona?.temperature != null) }
 
     val iconOptions = listOf(
@@ -896,8 +825,8 @@ private fun CharacterEditorDialog(
                         Slider(
                             value = tempSlider,
                             onValueChange = { tempSlider = it },
-                            valueRange = 0.0f..1.5f,
-                            steps = 15,
+                            valueRange = 0.0f..2.0f,
+                            steps = 20,
                         )
                     }
                 }

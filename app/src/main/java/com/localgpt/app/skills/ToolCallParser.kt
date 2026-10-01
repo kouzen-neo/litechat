@@ -14,12 +14,24 @@ data class ParsedToolCall(
 object ToolCallParser {
     private val gson = Gson()
     private val SEARCH_FN_REGEX = Pattern.compile(
-        "(?:call:)?(web_search(?:_id|_en|_indonesia|_global)?)\\s*\\(\\s*query\\s*=\\s*[\"']([^\"']+)[\"']\\s*\\)",
+        "(?<![\\w])(?:call:)?(web_search(?:_id|_en|_indonesia|_global)?)\\s*\\(\\s*query\\s*=\\s*[\"']([^\"']+)[\"']\\s*\\)",
+        Pattern.CASE_INSENSITIVE,
+    )
+    private val JSON_NAME_PATTERN = Pattern.compile(
+        "\"name\"\\s*:\\s*\"web_search(?:_id|_en|_indonesia|_global)?\"",
         Pattern.CASE_INSENSITIVE,
     )
 
     /**
      * Extracts a tool call from the generated text if present.
+     *
+     * Iteration contract: this parser is stateless and never loops by itself.
+     * Bounding the agentic loop is the caller's responsibility.
+     * ChatViewModel.handleAutonomousToolCall() performs exactly ONE tool-call
+     * round per generation (parse -> web search -> follow-up stream) and does
+     * not re-parse the follow-up, so a runaway model cannot trigger unbounded
+     * searches. If multi-step looping is added elsewhere, cap it (e.g. max 3
+     * iterations) and stop when no new tool call is produced.
      */
     fun parse(text: String): ParsedToolCall? {
         if (text.isBlank()) return null
@@ -49,16 +61,14 @@ object ToolCallParser {
         }
 
         // 3. Check for direct JSON tool call: {"name": "web_search...", ...}
+        // Balanced-brace scan: a lazy `.*?}` would stop at the first inner
+        // brace and truncate nested "arguments" objects, producing invalid JSON.
         if ((text.contains("\"web_search\"") || text.contains("\"web_search_id\"") || text.contains("\"web_search_en\"")) && text.contains("query")) {
-            val jsonPattern = Pattern.compile(
-                "\\{\\s*\"name\"\\s*:\\s*\"(web_search(?:_id|_en|_indonesia|_global)?)\"[\\s\\S]*?\\}",
-                Pattern.CASE_INSENSITIVE,
-            )
-            val jMatcher = jsonPattern.matcher(text)
-            if (jMatcher.find()) {
-                val jsonStr = jMatcher.group(0).orEmpty()
-                val parsed = parseJson(jsonStr, jsonStr)
-                if (parsed != null) return parsed
+            val nameMatcher = JSON_NAME_PATTERN.matcher(text)
+            if (nameMatcher.find()) {
+                extractBalancedJson(text, nameMatcher.start())?.let { jsonStr ->
+                    parseJson(jsonStr, jsonStr)?.let { return it }
+                }
             }
         }
 
@@ -93,19 +103,14 @@ object ToolCallParser {
     private fun parseJson(jsonStr: String, rawText: String): ParsedToolCall? {
         return try {
             val obj = gson.fromJson(jsonStr, JsonObject::class.java) ?: return null
-            val name = obj.get("name")?.asString.orEmpty()
+            val name = obj.optString("name")
             if (!name.startsWith("web_search", ignoreCase = true)) return null
 
-            var query = ""
-            if (obj.has("arguments")) {
-                val args = obj.get("arguments")
-                if (args.isJsonObject) {
-                    query = args.asJsonObject.get("query")?.asString.orEmpty()
-                } else if (args.isJsonPrimitive) {
-                    query = args.asString
-                }
-            } else if (obj.has("query")) {
-                query = obj.get("query")?.asString.orEmpty()
+            val args = obj.get("arguments")
+            val query = when {
+                args != null && args.isJsonObject -> args.asJsonObject.optString("query")
+                args != null && args.isJsonPrimitive && args.asJsonPrimitive.isString -> args.asString
+                else -> obj.optString("query")
             }
 
             if (query.isNotBlank()) {
@@ -117,4 +122,51 @@ object ToolCallParser {
             null
         }
     }
+
+    /**
+     * Extracts the first balanced `{...}` JSON object surrounding the match at
+     * [fromIndex] (the `"name"` key sits *inside* the object, so the opening
+     * brace is searched backwards). String literals (with escapes) are
+     * respected so braces inside quoted values don't break the scan. Returns
+     * null when no balanced object is found within a sane bound.
+     */
+    private fun extractBalancedJson(text: String, fromIndex: Int): String? {
+        var i = fromIndex
+        while (i >= 0 && text[i] != '{') i--
+        if (i < 0) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        val sb = StringBuilder()
+        for (j in i until text.length) {
+            val c = text[j]
+            sb.append(c)
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (c == '\\') {
+                    escaped = true
+                } else if (c == '"') {
+                    inString = false
+                }
+            } else {
+                when (c) {
+                    '"' -> inString = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return sb.toString()
+                    }
+                }
+            }
+            // Safety bound: a single tool call never needs more than this.
+            if (sb.length > 8192) return null
+        }
+        return null
+    }
+
+    private fun JsonObject.optString(key: String): String =
+        runCatching {
+            get(key)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString.orEmpty()
+        }.getOrDefault("")
 }

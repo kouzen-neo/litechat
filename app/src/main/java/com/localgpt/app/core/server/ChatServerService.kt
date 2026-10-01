@@ -7,9 +7,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -23,10 +25,12 @@ import com.localgpt.app.data.SettingsRepository
 import com.localgpt.app.localai.LocalAiCatalog
 import com.localgpt.app.localai.LocalModelManager
 import com.localgpt.app.util.KLog
+import com.localgpt.app.util.NetworkUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -43,6 +47,12 @@ class ChatServerService : Service() {
 
         const val CHANNEL_ID = "litechat_chat_server"
         const val NOTIFICATION_ID = 3001
+
+        private const val PREFS_NAME = "litechat_chat_server"
+        private const val KEY_WAS_RUNNING = "was_running"
+
+        /** Safety timeout for the generation WakeLock; always released earlier when idle. */
+        private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1000L
 
         @Volatile
         private var channelCreated = false
@@ -61,6 +71,17 @@ class ChatServerService : Service() {
                 Log.e("ChatServerService", "Failed to send stop intent", e)
                 OpenAiServer.stop()
             }
+        }
+
+        private fun serverPrefs(context: Context): SharedPreferences =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        /** True if the server was explicitly started and never explicitly stopped. */
+        fun wasRunning(context: Context): Boolean =
+            serverPrefs(context).getBoolean(KEY_WAS_RUNNING, false)
+
+        private fun setWasRunning(context: Context, running: Boolean) {
+            serverPrefs(context).edit().putBoolean(KEY_WAS_RUNNING, running).apply()
         }
 
         private fun ensureNotificationChannel(context: Context) {
@@ -112,6 +133,7 @@ class ChatServerService : Service() {
                 systemPrompt = settings.systemPrompt,
                 temperature = settings.temperature,
                 topK = settings.topK,
+                topP = settings.topP,
                 maxTokens = settings.maxTokens,
                 backend = settings.backend,
                 modelPath = modelPath,
@@ -130,15 +152,22 @@ class ChatServerService : Service() {
     ): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                setWasRunning(this, false)
+                releaseWakeLock()
                 OpenAiServer.stop()
                 stopForegroundNotification()
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_START -> Unit
+            ACTION_START -> setWasRunning(this, true)
             else -> {
-                stopSelf()
-                return START_NOT_STICKY
+                // Null intent means the system restarted the service (START_STICKY).
+                // Restore the previous state: only come back up if we were running.
+                if (intent != null || !wasRunning(this)) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                KLog.d("ChatServerService", "Restarted by system; restoring previous server state")
             }
         }
 
@@ -181,25 +210,55 @@ class ChatServerService : Service() {
                 updateNotification("Server error: ${e.message ?: e.javaClass.simpleName}")
             }
         }
+        observeServerActivity()
         return START_STICKY
     }
 
-    private fun lanHint(): String =
-        try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val nif = interfaces.nextElement()
-                if (!nif.isUp || nif.isLoopback) continue
-                for (addr in nif.inetAddresses) {
-                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                        return addr.hostAddress ?: "0.0.0.0"
-                    }
-                }
+    @Volatile
+    private var activityObserverStarted = false
+
+    /**
+     * Holds a partial WakeLock while generations are in flight so Doze cannot
+     * suspend the CPU mid-generation when the screen is off; released when idle.
+     */
+    private fun observeServerActivity() {
+        if (activityObserverStarted) return
+        activityObserverStarted = true
+        scope.launch {
+            OpenAiServer.activeRequests.collect { active ->
+                if (active > 0) acquireWakeLock() else releaseWakeLock()
             }
-            "0.0.0.0"
-        } catch (_: Exception) {
-            "0.0.0.0"
         }
+    }
+
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    private fun acquireWakeLock() {
+        try {
+            var wl = wakeLock
+            if (wl == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+                wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LiteChat:ServerGeneration")
+                wakeLock = wl
+            }
+            if (wl.isHeld) wl.release() // reset the safety timeout
+            wl.acquire(WAKE_LOCK_TIMEOUT_MS)
+        } catch (e: Exception) {
+            Log.e("ChatServerService", "Failed to acquire wake lock", e)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {
+        }
+        wakeLock = null
+    }
+
+    private fun lanHint(): String =
+        // Delegate to the shared helper so the LAN-address rules stay in one place.
+        NetworkUtils.getLocalIpAddress(this) ?: "0.0.0.0"
 
     private fun buildNotification(text: String): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP }
@@ -251,6 +310,7 @@ class ChatServerService : Service() {
     }
 
     override fun onDestroy() {
+        releaseWakeLock()
         OpenAiServer.stop()
         scope.cancel()
         super.onDestroy()

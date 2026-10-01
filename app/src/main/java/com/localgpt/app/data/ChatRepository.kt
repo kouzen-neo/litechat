@@ -3,6 +3,7 @@ package com.localgpt.app.data
 import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.localgpt.app.util.KLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -48,6 +49,34 @@ class ChatRepository(
 
     private fun fileFor(id: String) = File(dir, "$id.json")
 
+    /**
+     * Writes [text] to [file] atomically: content goes to a temp sibling file
+     * first, then is renamed over the target. A crash mid-write can never leave
+     * a half-written conversation file behind.
+     *
+     * @return true on success, false on failure (also logged via KLog).
+     */
+    private fun writeAtomically(
+        file: File,
+        text: String,
+    ): Boolean =
+        try {
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            if (tmp.exists()) tmp.delete()
+            tmp.writeText(text)
+            if (tmp.renameTo(file)) {
+                true
+            } else {
+                // renameTo can fail across filesystems; fall back to copy+delete.
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+                true
+            }
+        } catch (e: Exception) {
+            KLog.e("ChatRepository", "Atomic write failed for ${file.name}", e)
+            false
+        }
+
     suspend fun listConversations(): List<Conversation> =
         withContext(Dispatchers.IO) {
             try {
@@ -56,12 +85,14 @@ class ChatRepository(
                     ?.mapNotNull { f ->
                         try {
                             normalize(gson.fromJson(f.readText(), object : TypeToken<Conversation>() {}.type))
-                        } catch (_: Exception) {
+                        } catch (e: Exception) {
+                            KLog.w("ChatRepository", "Skipping unreadable conversation file ${f.name}: ${e.message}")
                             null
                         }
                     }?.sortedByDescending { it.updatedAt }
                     ?: emptyList()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                KLog.e("ChatRepository", "Failed to list conversations", e)
                 emptyList()
             }
         }
@@ -75,7 +106,8 @@ class ChatRepository(
                 } else {
                     null
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                KLog.w("ChatRepository", "Failed to read conversation $id: ${e.message}")
                 null
             }
         }
@@ -88,9 +120,8 @@ class ChatRepository(
                     conversation.messages.firstOrNull { it.role == ChatConstants.ROLE_USER }
                         ?.content?.take(48)?.replace("\n", " ") ?: "New Chat"
             }
-            try {
-                fileFor(conversation.id).writeText(gson.toJson(conversation))
-            } catch (_: Exception) {
+            if (!writeAtomically(fileFor(conversation.id), gson.toJson(conversation))) {
+                KLog.e("ChatRepository", "save() failed for conversation ${conversation.id}")
             }
             conversation
         }
@@ -100,12 +131,7 @@ class ChatRepository(
             val conv = get(id) ?: return@withContext false
             conv.title = newTitle.trim().ifBlank { "Untitled Chat" }
             conv.updatedAt = System.currentTimeMillis()
-            try {
-                fileFor(conv.id).writeText(gson.toJson(conv))
-                true
-            } catch (_: Exception) {
-                false
-            }
+            writeAtomically(fileFor(conv.id), gson.toJson(conv))
         }
 
     suspend fun delete(id: String): Boolean =

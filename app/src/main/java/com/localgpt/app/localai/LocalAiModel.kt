@@ -16,6 +16,13 @@ data class LocalAiModel(
     val recommendedTemp: Float = 0.2f,
     val recommendedTopK: Int = 40,
     val recommendedMaxTokens: Int = 512,
+    /**
+     * Optional expected SHA-256 hex digest of the model file. When set, the
+     * downloader verifies the file after download and deletes it on mismatch.
+     * Null = skip verification (checksums for the preset catalog are not
+     * published, so presets leave this unset).
+     */
+    val expectedSha256: String? = null,
 )
 
 /**

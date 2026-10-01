@@ -1,7 +1,9 @@
 package com.localgpt.app.core.server
+
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.localgpt.app.data.ChatConstants
 
-import com.google.gson.JsonObject
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -13,6 +15,8 @@ object SseProtocol {
     private val counter = AtomicLong(0L)
 
     fun newId(): String = "chatcmpl-litechat-${System.currentTimeMillis()}-${counter.incrementAndGet()}"
+
+    fun newCompletionId(): String = "cmpl-litechat-${System.currentTimeMillis()}-${counter.incrementAndGet()}"
 
     fun chunk(
         id: String,
@@ -36,7 +40,7 @@ object SseProtocol {
                 addProperty("object", "chat.completion.chunk")
                 addProperty("created", System.currentTimeMillis() / 1000)
                 addProperty("model", model)
-                add("choices", com.google.gson.JsonArray().apply { add(choice) })
+                add("choices", JsonArray().apply { add(choice) })
             }
         return "data: $root"
     }
@@ -57,12 +61,86 @@ object SseProtocol {
                 addProperty("object", "chat.completion.chunk")
                 addProperty("created", System.currentTimeMillis() / 1000)
                 addProperty("model", model)
-                add("choices", com.google.gson.JsonArray().apply { add(choice) })
+                add("choices", JsonArray().apply { add(choice) })
             }
         return "data: $root"
     }
 
     fun done(): String = "data: [DONE]"
+
+    /**
+     * Error payload for mid-stream failures. Write this before [done] so the
+     * client can distinguish a truncated stream from a clean finish.
+     */
+    fun errorChunk(
+        message: String,
+        type: String = "generation_failed",
+    ): String {
+        val root =
+            JsonObject().apply {
+                add(
+                    "error",
+                    JsonObject().apply {
+                        addProperty("message", message)
+                        addProperty("type", type)
+                    },
+                )
+            }
+        return "data: $root"
+    }
+
+    /** Streaming chunk in legacy `text_completion` format. */
+    fun textChunk(
+        id: String,
+        model: String,
+        deltaText: String?,
+        finishReason: String? = null,
+    ): String {
+        val choice =
+            JsonObject().apply {
+                addProperty("index", 0)
+                if (deltaText != null) addProperty("text", deltaText)
+                if (finishReason != null) addProperty("finish_reason", finishReason)
+            }
+        val root =
+            JsonObject().apply {
+                addProperty("id", id)
+                addProperty("object", "text_completion")
+                addProperty("created", System.currentTimeMillis() / 1000)
+                addProperty("model", model)
+                add("choices", JsonArray().apply { add(choice) })
+            }
+        return "data: $root"
+    }
+
+    /** Full non-streaming response body in legacy `text_completion` format. */
+    fun textCompletion(
+        id: String,
+        model: String,
+        content: String,
+    ): JsonObject {
+        val choice =
+            JsonObject().apply {
+                addProperty("index", 0)
+                addProperty("text", content)
+                addProperty("finish_reason", "stop")
+            }
+        return JsonObject().apply {
+            addProperty("id", id)
+            addProperty("object", "text_completion")
+            addProperty("created", System.currentTimeMillis() / 1000)
+            addProperty("model", model)
+            add("choices", JsonArray().apply { add(choice) })
+            add(
+                "usage",
+                JsonObject().apply {
+                    addProperty("prompt_tokens", 0)
+                    addProperty("completion_tokens", 0)
+                    addProperty("total_tokens", 0)
+                },
+            )
+        }
+    }
 
     /**
      * Full non-streaming response body in `chat.completion` format.
@@ -88,7 +166,7 @@ object SseProtocol {
             addProperty("object", "chat.completion")
             addProperty("created", System.currentTimeMillis() / 1000)
             addProperty("model", model)
-            add("choices", com.google.gson.JsonArray().apply { add(choice) })
+            add("choices", JsonArray().apply { add(choice) })
             add(
                 "usage",
                 JsonObject().apply {

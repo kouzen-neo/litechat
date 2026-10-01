@@ -278,10 +278,12 @@ internal fun MessageList(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val messageCount = viewModel.messages.size
+    val settings by viewModel.settings.collectAsState()
 
-    // Scroll to bottom (index 0 in reverseLayout) when a new message is sent or started
-    LaunchedEffect(messageCount) {
-        if (messageCount > 0) {
+    // Scroll to bottom (index 0 in reverseLayout) when a new message is sent or started.
+    // Respects the "Auto-scroll" setting — when off, the list stays where the user left it.
+    LaunchedEffect(messageCount, settings.autoScroll) {
+        if (messageCount > 0 && settings.autoScroll) {
             listState.animateScrollToItem(0)
         }
     }

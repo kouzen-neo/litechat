@@ -283,38 +283,42 @@ class RagManager private constructor(private val context: Context) {
      * Retrieves top matching excerpts for [query]. Returns formatted prompt
      * block plus citation labels, or null when nothing relevant was found.
      * With [includeMemory], archived conversation excerpts compete as [MemN].
+     *
+     * Runs on [Dispatchers.IO]: index building reads chunk files from disk and
+     * BM25 scoring is CPU-heavy, so this must never run on the main thread.
      */
-    fun retrieve(
+    suspend fun retrieve(
         query: String,
         includeMemory: Boolean = false,
-    ): Pair<String, List<String>>? {
-        ensureIndex()
-        val docHits = searchInternal(query, includeMemory = false).take(TOP_K)
-        val memHits = if (includeMemory) searchInternal(query, includeMemory = true).take(2) else emptyList()
-        if (docHits.isEmpty() && memHits.isEmpty()) return null
+    ): Pair<String, List<String>>? =
+        withContext(Dispatchers.IO) {
+            ensureIndex()
+            val docHits = searchInternal(query, includeMemory = false).take(TOP_K)
+            val memHits = if (includeMemory) searchInternal(query, includeMemory = true).take(2) else emptyList()
+            if (docHits.isEmpty() && memHits.isEmpty()) return@withContext null
 
-        val sb = StringBuilder()
-        sb.appendLine("Relevant excerpts. [DocN] items come from the user's knowledge base documents; [MemN] items are excerpts from earlier parts of this conversation (archived memory). Use them when relevant and cite the labels.")
-        val labels = ArrayList<String>(docHits.size + memHits.size)
-        docHits.forEachIndexed { i, h ->
-            val label = "[Doc${i + 1}]"
-            labels.add("${h.docName} #${h.chunkIndex + 1}")
-            sb.appendLine("$label ${h.docName} · excerpt ${h.chunkIndex + 1}:")
-            sb.appendLine(h.text.trim())
-            sb.appendLine()
+            val sb = StringBuilder()
+            sb.appendLine("Relevant excerpts. [DocN] items come from the user's knowledge base documents; [MemN] items are excerpts from earlier parts of this conversation (archived memory). Use them when relevant and cite the labels.")
+            val labels = ArrayList<String>(docHits.size + memHits.size)
+            docHits.forEachIndexed { i, h ->
+                val label = "[Doc${i + 1}]"
+                labels.add("${h.docName} #${h.chunkIndex + 1}")
+                sb.appendLine("$label ${h.docName} · excerpt ${h.chunkIndex + 1}:")
+                sb.appendLine(h.text.trim())
+                sb.appendLine()
+            }
+            memHits.forEachIndexed { i, h ->
+                val label = "[Mem${i + 1}]"
+                labels.add("memory #${h.chunkIndex + 1}")
+                sb.appendLine("$label Earlier conversation · excerpt ${h.chunkIndex + 1}:")
+                sb.appendLine(h.text.trim())
+                sb.appendLine()
+            }
+            sb.toString().trimEnd() to labels
         }
-        memHits.forEachIndexed { i, h ->
-            val label = "[Mem${i + 1}]"
-            labels.add("memory #${h.chunkIndex + 1}")
-            sb.appendLine("$label Earlier conversation · excerpt ${h.chunkIndex + 1}:")
-            sb.appendLine(h.text.trim())
-            sb.appendLine()
-        }
-        return sb.toString().trimEnd() to labels
-    }
 
     /** Legacy entry point: documents only. */
-    fun retrieve(query: String): Pair<String, List<String>>? = retrieve(query, includeMemory = false)
+    suspend fun retrieve(query: String): Pair<String, List<String>>? = retrieve(query, includeMemory = false)
 
     private fun searchInternal(
         query: String,
@@ -329,6 +333,15 @@ class RagManager private constructor(private val context: Context) {
         if (qTokens.isEmpty()) return emptyList()
         val pool = chunks.filter { it.isMemory == includeMemory }
         if (pool.isEmpty()) return emptyList()
+        val qTokenSet = qTokens.toSet()
+        // Document frequencies for this pool, computed once in O(C) instead of
+        // re-scanning the whole pool for every query token (was O(Q x C)).
+        val poolDf = HashMap<String, Int>()
+        for (c in pool) {
+            for (t in c.tf.keys) {
+                if (t in qTokenSet) poolDf[t] = (poolDf[t] ?: 0) + 1
+            }
+        }
         val n = pool.size.toDouble()
         val avgLen = pool.sumOf { it.length } / n.coerceAtLeast(1.0)
         val scored = ArrayList<RagHit>()
@@ -336,7 +349,7 @@ class RagManager private constructor(private val context: Context) {
             var score = 0.0
             for (t in qTokens) {
                 val tf = c.tf[t]?.toDouble() ?: continue
-                val dfN = pool.count { it.tf.containsKey(t) }.toDouble()
+                val dfN = (poolDf[t] ?: 0).toDouble()
                 val idf = Math.log(1.0 + (n - dfN + 0.5) / (dfN + 0.5))
                 score += idf * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * c.length / avgLen))
             }
@@ -345,8 +358,10 @@ class RagManager private constructor(private val context: Context) {
         return scored.sortedByDescending { it.score }.take(topK)
     }
 
-    fun search(query: String, topK: Int = TOP_K): List<RagHit> =
-        searchInternal(query, topK = topK, includeMemory = false)
+    suspend fun search(query: String, topK: Int = TOP_K): List<RagHit> =
+        withContext(Dispatchers.IO) {
+            searchInternal(query, topK = topK, includeMemory = false)
+        }
 
     private fun ensureIndex() {
         if (!indexDirty && chunks.isNotEmpty()) return

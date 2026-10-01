@@ -149,9 +149,9 @@ class WebSearchManager private constructor(private val context: Context) {
             .header("User-Agent", USER_AGENT)
             .build()
 
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) return emptyList()
-        val xmlStr = response.body?.string() ?: return emptyList()
+        val xmlStr: String = client.newCall(request).execute().use { response ->
+            if (response.isSuccessful) response.body?.string() else null
+        } ?: return emptyList()
 
         val results = mutableListOf<WebSearchItem>()
         try {
@@ -209,9 +209,9 @@ class WebSearchManager private constructor(private val context: Context) {
             .header("Accept-Language", acceptLang)
             .build()
 
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) return emptyList()
-        val html = response.body?.string() ?: return emptyList()
+        val html: String = client.newCall(request).execute().use { response ->
+            if (response.isSuccessful) response.body?.string() else null
+        } ?: return emptyList()
 
         val linkPattern = Pattern.compile(
             "<a[^>]*class=['\"]result-link['\"][^>]*href=['\"]([^'\"]+)['\"][^>]*>([\\s\\S]*?)<\\/a>|<a[^>]*href=['\"]([^'\"]+)['\"][^>]*class=['\"]result-link['\"][^>]*>([\\s\\S]*?)<\\/a>",
@@ -266,9 +266,9 @@ class WebSearchManager private constructor(private val context: Context) {
             .header("User-Agent", USER_AGENT)
             .build()
 
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) return emptyList()
-        val jsonStr = response.body?.string() ?: return emptyList()
+        val jsonStr: String = client.newCall(request).execute().use { response ->
+            if (response.isSuccessful) response.body?.string() else null
+        } ?: return emptyList()
 
         val root = gson.fromJson(jsonStr, JsonObject::class.java)
         val queryObj = root?.getAsJsonObject("query") ?: return emptyList()
@@ -293,18 +293,17 @@ class WebSearchManager private constructor(private val context: Context) {
             val titlesEncoded = pageTitles.joinToString("|") { URLEncoder.encode(it, "UTF-8") }
             val extractUrl = "https://$lang.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=$titlesEncoded&format=json"
             val eReq = Request.Builder().url(extractUrl).header("User-Agent", USER_AGENT).build()
-            val eRes = client.newCall(eReq).execute()
-            if (eRes.isSuccessful) {
-                val eJson = eRes.body?.string().orEmpty()
-                val eRoot = gson.fromJson(eJson, JsonObject::class.java)
-                val pages = eRoot?.getAsJsonObject("query")?.getAsJsonObject("pages")
-                pages?.keySet()?.forEach { pid ->
-                    val p = pages.getAsJsonObject(pid)
-                    val pTitle = p?.get("title")?.asString.orEmpty()
-                    val pExtract = p?.get("extract")?.asString.orEmpty().trim()
-                    if (pTitle.isNotBlank() && pExtract.isNotBlank()) {
-                        extractsMap[pTitle] = pExtract.replace("\n", " ").trim()
-                    }
+            val eJson: String = client.newCall(eReq).execute().use { eRes ->
+                if (eRes.isSuccessful) eRes.body?.string() else null
+            }.orEmpty()
+            val eRoot = gson.fromJson(eJson, JsonObject::class.java)
+            val pages = eRoot?.getAsJsonObject("query")?.getAsJsonObject("pages")
+            pages?.keySet()?.forEach { pid ->
+                val p = pages.getAsJsonObject(pid)
+                val pTitle = p?.get("title")?.asString.orEmpty()
+                val pExtract = p?.get("extract")?.asString.orEmpty().trim()
+                if (pTitle.isNotBlank() && pExtract.isNotBlank()) {
+                    extractsMap[pTitle] = pExtract.replace("\n", " ").trim()
                 }
             }
         } catch (e: Exception) {
@@ -338,16 +337,15 @@ class WebSearchManager private constructor(private val context: Context) {
                 .header("User-Agent", USER_AGENT)
                 .header("Accept", "text/plain")
                 .build()
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val text = response.body?.string().orEmpty().take(900)
-                if (text.isNotBlank()) {
-                    return WebSearchItem(
-                        title = "Web Page: $targetUrl",
-                        snippet = text,
-                        url = targetUrl,
-                    )
-                }
+            val text: String = client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) response.body?.string() else null
+            }.orEmpty().take(900)
+            if (text.isNotBlank()) {
+                return WebSearchItem(
+                    title = "Web Page: $targetUrl",
+                    snippet = text,
+                    url = targetUrl,
+                )
             }
         } catch (e: Exception) {
             KLog.e("WebSearch", "Jina AI Reader failed for $targetUrl", e)
@@ -360,9 +358,10 @@ class WebSearchManager private constructor(private val context: Context) {
                 .header("User-Agent", USER_AGENT)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 .build()
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val rawHtml = response.body?.string().orEmpty()
+            val rawHtml: String = client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) response.body?.string() else null
+            }.orEmpty()
+            if (rawHtml.isNotBlank()) {
                 val titleMatcher = Pattern.compile("<title>([\\s\\S]*?)</title>", Pattern.CASE_INSENSITIVE).matcher(rawHtml)
                 val title = if (titleMatcher.find()) stripHtml(titleMatcher.group(1).orEmpty()) else targetUrl
                 val bodyText = stripHtml(rawHtml).take(900)

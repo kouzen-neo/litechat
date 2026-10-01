@@ -57,6 +57,7 @@ class LocalModelDownloader private constructor(
                 fileName = model.fileName,
                 downloadUrl = model.downloadUrl,
                 sizeBytes = model.sizeBytes,
+                expectedSha256 = model.expectedSha256,
             )
         } catch (e: Exception) {
             Log.e("LocalModelDownloader", "startDownload failed", e)
@@ -69,6 +70,7 @@ class LocalModelDownloader private constructor(
         fileName: String,
         downloadUrl: String,
         expectedSizeBytes: Long = 0L,
+        expectedSha256: String? = null,
     ) {
         updateState(id, DownloadState.Downloading(0f, 0L, expectedSizeBytes, 0L, fileName, fileName))
         try {
@@ -79,6 +81,7 @@ class LocalModelDownloader private constructor(
                 fileName = fileName,
                 downloadUrl = downloadUrl,
                 sizeBytes = expectedSizeBytes,
+                expectedSha256 = expectedSha256,
             )
         } catch (e: Exception) {
             Log.e("LocalModelDownloader", "startCustomDownload failed", e)

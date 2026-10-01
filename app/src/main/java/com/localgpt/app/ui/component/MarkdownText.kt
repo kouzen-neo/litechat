@@ -20,7 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.TextLinkStyles
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -725,9 +726,17 @@ private fun annotate(
                 }
                 raw.startsWith("[") && raw.contains("](") -> {
                     val linkText = raw.substringAfter("[").substringBefore("]")
-                    pushStyle(linkStyle)
-                    append(linkText)
-                    pop()
+                    val url = raw.substringAfter("](").substringBeforeLast(")")
+                    val linkTextStyles =
+                        TextLinkStyles(
+                            style = linkStyle,
+                            focusedStyle = linkStyle,
+                            hoveredStyle = linkStyle,
+                            pressedStyle = linkStyle,
+                        )
+                    withLink(LinkAnnotation.Url(url, linkTextStyles)) {
+                        append(linkText)
+                    }
                 }
                 else -> append(raw)
             }

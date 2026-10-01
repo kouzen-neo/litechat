@@ -11,6 +11,7 @@ import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ThinkingConfig
 import com.localgpt.app.util.KLog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -236,22 +237,47 @@ class LiteRtEngineManager private constructor(
                 KLog.e("LiteRT", "Failed to set thread priority: ${e.message}")
             }
 
-            val startTime = System.currentTimeMillis()
-            var firstTokenTime = 0L
-            val inputTokens = estimateTokenCount(prompt)
+            val requestStart = System.currentTimeMillis()
+
+            // Honor EngineParams.systemPrompt. Chat flows normally bake it into the
+            // prompt via PromptBuilder; apply it here only when it isn't already
+            // present, so direct callers (e.g. benchmark) get a working persona too.
+            val systemText = params.systemPrompt.trim()
+            val effectivePrompt =
+                if (systemText.isNotEmpty() && !prompt.contains(systemText)) {
+                    logEngine("[LiteRT] Applying EngineParams.systemPrompt at engine layer")
+                    "$systemText\n\n$prompt"
+                } else {
+                    prompt
+                }
+            val inputTokens = estimateTokenCount(effectivePrompt)
+            val modelName = File(params.modelPath).name
+
+            // Stage vision input outside the lock: pure IO, no shared state.
+            val validImageFile: File? =
+                if (!imagePath.isNullOrBlank()) {
+                    File(imagePath).takeIf { it.exists() }
+                } else if (imageBytes != null && imageBytes.isNotEmpty()) {
+                    try {
+                        val temp = File(context.cacheDir, "temp_vision_input.jpg")
+                        temp.writeBytes(imageBytes)
+                        temp
+                    } catch (_: Exception) {
+                        null
+                    }
+                } else {
+                    null
+                }
 
             _isGenerating.value = true
             try {
-                val activeEngine = getOrCreateEngine(params)
-                val backendName = activeBackend ?: params.backend
-                val modelName = File(params.modelPath).name
-
-                val imgTag = if (!imagePath.isNullOrBlank()) " + image ($imagePath)" else if (imageBytes != null && imageBytes.isNotEmpty()) " + image (${imageBytes.size / 1024} KB)" else ""
-                logEngine("[LiteRT Request] Stream on $backendName ($modelName)$imgTag")
-                logEngine("  ├── Input: ~$inputTokens tokens (${prompt.length} chars) · temp=${params.temperature}, topK=${params.topK}")
+                var firstTokenTime = 0L
+                var engineReadyTime = 0L
+                var outputChars = 0
+                var maxTokensReached = false
+                val maxTokens = params.maxTokens.takeIf { it > 0 } ?: Int.MAX_VALUE
 
                 var outputText = ""
-                var tokenCount = 0
                 var inThinkingBlock = false
                 var thoughtSeen = ""
 
@@ -292,13 +318,35 @@ class LiteRtEngineManager private constructor(
                         if (firstTokenTime == 0L) {
                             firstTokenTime = System.currentTimeMillis()
                         }
-                        tokenCount++
                         outputText += out
+                        outputChars += out.length
                         emit(out)
+                        // Per-request maxTokens enforcement (chars/3.8 token estimate).
+                        // Stops the native generation; the resulting CancellationException
+                        // is treated as a normal stop by the collector below.
+                        if (!maxTokensReached && outputChars / 3.8 >= maxTokens) {
+                            maxTokensReached = true
+                            logEngine("[LiteRT] maxTokens ($maxTokens) reached — stopping generation")
+                            cancelGeneration()
+                        }
                     }
                 }
 
+                // Engine acquisition happens INSIDE the same mutex as generation, so
+                // unload() can never close the engine out from under an in-flight request.
+                var backendName = params.backend
                 mutex.withLock {
+                    val activeEngine = withContext(Dispatchers.IO) { getOrCreateEngineLocked(params) }
+                    engineReadyTime = System.currentTimeMillis()
+                    backendName = activeBackend ?: params.backend
+
+                    val imgTag =
+                        if (!imagePath.isNullOrBlank()) " + image ($imagePath)"
+                        else if (imageBytes != null && imageBytes.isNotEmpty()) " + image (${imageBytes.size / 1024} KB)"
+                        else ""
+                    logEngine("[LiteRT Request] Stream on $backendName ($modelName)$imgTag")
+                    logEngine("  ├── Input: ~$inputTokens tokens (${effectivePrompt.length} chars) · temp=${params.temperature}, topK=${params.topK}, maxTokens=${params.maxTokens}")
+
                     val sampler =
                         SamplerConfig(
                             topK = params.topK,
@@ -309,21 +357,6 @@ class LiteRtEngineManager private constructor(
                     activeConversation = conv
                     val thinkingConfig = ThinkingConfig(enableThinking = params.enableThinking)
 
-                    val validImageFile =
-                        if (!imagePath.isNullOrBlank()) {
-                            File(imagePath).takeIf { it.exists() }
-                        } else if (imageBytes != null && imageBytes.isNotEmpty()) {
-                            try {
-                                val temp = File(context.cacheDir, "temp_vision_input.jpg")
-                                temp.writeBytes(imageBytes)
-                                temp
-                            } catch (_: Exception) {
-                                null
-                            }
-                        } else {
-                            null
-                        }
-
                     try {
                         val stream =
                             if (validImageFile != null && activeVisionSupported) {
@@ -331,27 +364,37 @@ class LiteRtEngineManager private constructor(
                                     val contents =
                                         Contents.of(
                                             Content.ImageFile(validImageFile.absolutePath),
-                                            Content.Text(prompt),
+                                            Content.Text(effectivePrompt),
                                         )
                                     conv.sendMessageAsync(contents, thinkingConfig = thinkingConfig)
                                 } catch (e: Throwable) {
                                     logEngine("[WARN] Multimodal vision input rejected (${e.message}). Falling back to text prompt.")
-                                    conv.sendMessageAsync(prompt, thinkingConfig = thinkingConfig)
+                                    conv.sendMessageAsync(effectivePrompt, thinkingConfig = thinkingConfig)
                                 }
                             } else {
                                 if (validImageFile != null && !activeVisionSupported) {
                                     logEngine("[WARN] Active model has no vision encoder. Prompting with text only.")
                                 }
-                                conv.sendMessageAsync(prompt, thinkingConfig = thinkingConfig)
+                                conv.sendMessageAsync(effectivePrompt, thinkingConfig = thinkingConfig)
                             }
 
                         try {
                             stream.collect(processChunk)
+                        } catch (ce: CancellationException) {
+                            // Deliberate stop at maxTokens: treat as normal completion.
+                            // External cancellation (user pressed stop) still rethrows.
+                            if (!maxTokensReached) throw ce
+                            logEngine("[LiteRT] Generation stopped at maxTokens limit")
                         } catch (t: Throwable) {
                             if (validImageFile != null && outputText.isBlank()) {
                                 logEngine("[WARN] Multimodal streaming encountered error (${t.message}), retrying with text prompt fallback...")
-                                val fallbackStream = conv.sendMessageAsync(prompt, thinkingConfig = thinkingConfig)
-                                fallbackStream.collect(processChunk)
+                                val fallbackStream = conv.sendMessageAsync(effectivePrompt, thinkingConfig = thinkingConfig)
+                                try {
+                                    fallbackStream.collect(processChunk)
+                                } catch (ce: CancellationException) {
+                                    if (!maxTokensReached) throw ce
+                                    logEngine("[LiteRT] Generation stopped at maxTokens limit")
+                                }
                             } else {
                                 throw t
                             }
@@ -371,11 +414,13 @@ class LiteRtEngineManager private constructor(
                 }
 
                 val now = System.currentTimeMillis()
-                val totalDurationSec = maxOf(0.01f, (now - startTime) / 1000.0f)
+                val totalDurationSec = maxOf(0.01f, (now - requestStart) / 1000.0f)
                 val decodeDurationSec = if (firstTokenTime > 0L) maxOf(0.01f, (now - firstTokenTime) / 1000.0f) else totalDurationSec
-                val outputTokens = maxOf(tokenCount, estimateTokenCount(outputText))
+                // Token estimate from generated chars, not from chunk count.
+                val outputTokens = estimateTokenCount(outputText)
                 val tokPerSec = outputTokens / decodeDurationSec
-                val ttft = if (firstTokenTime > 0L) (firstTokenTime - startTime) else 0L
+                // Pure TTFT: measured from engine-ready, excluding cold-start model load.
+                val ttft = if (firstTokenTime > 0L && engineReadyTime > 0L) maxOf(0L, firstTokenTime - engineReadyTime) else 0L
 
                 logEngine("[LiteRT Response] Generated $outputTokens tokens in %.2fs (%.1f tok/s, TTFT: ${ttft}ms)".format(Locale.US, decodeDurationSec, tokPerSec))
 
@@ -433,97 +478,106 @@ class LiteRtEngineManager private constructor(
     suspend fun getOrCreateEngine(params: EngineParams): Engine =
         withContext(Dispatchers.IO) {
             mutex.withLock {
-                val file = File(params.modelPath)
-            if (!file.exists() || file.length() == 0L) {
-                val err = "Model file not found at: ${params.modelPath}"
-                logEngine("[ERROR] $err")
-                KLog.e("LiteRT", err)
-                throw IllegalStateException(err)
+                getOrCreateEngineLocked(params)
             }
-
-            val needsReload =
-                engine == null ||
-                    activeModelPath != params.modelPath ||
-                    (activeBackend != null && !activeBackend!!.startsWith(params.backend, ignoreCase = true))
-
-            if (needsReload) {
-                unloadLocked()
-                val specs = getSystemSpecs(context)
-                val fileSizeStr = formatBytes(file.length())
-                val tokenBudget = maxOf(1024, maxOf(params.contextWindow, params.maxTokens))
-
-                logEngine("[LiteRT Device] ${specs.deviceModel} (${specs.chipset}) · ${specs.cores} Cores · ${specs.abi}")
-                logEngine(
-                    String.format(
-                        Locale.US,
-                        "[LiteRT Device] RAM: %.2f GB Free / %.2f GB Total (Low Memory: %b)",
-                        specs.availRamGb,
-                        specs.totalRamGb,
-                        specs.isLowMemory,
-                    ),
-                )
-                logEngine("[LiteRT Engine] Model: ${file.name} ($fileSizeStr) · Target: ${params.backend} · Budget: $tokenBudget tokens")
-
-                val startInit = System.currentTimeMillis()
-                val candidateForVision = isVisionCandidate(params.modelPath)
-
-                try {
-                    val targetBackend =
-                        if (params.backend.equals("CPU", ignoreCase = true)) Backend.CPU() else Backend.GPU()
-                    val initTarget = if (targetBackend is Backend.GPU) "OpenCL GPU shader cache" else "CPU XNNPack engine"
-                    logEngine("[LiteRT Engine] Initializing $initTarget...")
-
-                    val (newEngine, visionOk) =
-                        initEngineInstance(
-                            modelPath = params.modelPath,
-                            targetBackend = targetBackend,
-                            tokenBudget = tokenBudget,
-                            tryVision = candidateForVision,
-                        )
-                    engine = newEngine
-                    activeBackend = params.backend
-                    activeVisionSupported = visionOk
-                    val initDuration = System.currentTimeMillis() - startInit
-                    val visionBadge = if (visionOk) " + Vision" else " (Text Only)"
-                    logEngine("[LiteRT Engine] ${params.backend}$visionBadge Initialization Successful (${initDuration}ms)")
-                } catch (e: Exception) {
-                    if (!params.backend.equals("CPU", ignoreCase = true)) {
-                        logEngine("[WARN] GPU OpenCL rejected (${e.message ?: e.javaClass.simpleName}). Falling back to CPU (XNNPack)...")
-                        KLog.w("LiteRT", "GPU OpenCL rejected, falling back to CPU: ${e.message}")
-                        try {
-                            val (newEngine, visionOk) =
-                                initEngineInstance(
-                                    modelPath = params.modelPath,
-                                    targetBackend = Backend.CPU(),
-                                    tokenBudget = tokenBudget,
-                                    tryVision = candidateForVision,
-                                )
-                            engine = newEngine
-                            activeBackend = "CPU (Fallback)"
-                            activeVisionSupported = visionOk
-                            val fallbackDuration = System.currentTimeMillis() - startInit
-                            logEngine("[LiteRT Engine] CPU Fallback Successful (${fallbackDuration}ms)")
-                        } catch (cpuEx: Exception) {
-                            val failMsg = "GPU and CPU initialization failed: ${cpuEx.message ?: cpuEx.javaClass.simpleName}"
-                            logEngine("[ERROR] $failMsg")
-                            KLog.e("LiteRT", failMsg, cpuEx)
-                            throw IllegalStateException("Failed to load LiteRT model ($failMsg)", cpuEx)
-                        }
-                    } else {
-                        val failMsg = "CPU initialization failed: ${e.message ?: e.javaClass.simpleName}"
-                        logEngine("[ERROR] $failMsg")
-                        KLog.e("LiteRT", failMsg, e)
-                        throw IllegalStateException("Failed to load LiteRT model ($failMsg)", e)
-                    }
-                }
-                activeModelPath = params.modelPath
-                _activeBackendState.value = activeBackend
-                _isModelLoaded.value = true
-                _loadedModelPath.value = params.modelPath
-            }
-
-            engine ?: throw IllegalStateException("Google AI Edge LiteRT-LM engine initialization failed.")
         }
+
+    /**
+     * Engine init core. The caller must already hold [mutex]: [streamResponse]
+     * acquires the engine inside the same lock that guards generation, so
+     * [unload] can never close the engine underneath an in-flight request.
+     */
+    private suspend fun getOrCreateEngineLocked(params: EngineParams): Engine {
+        val file = File(params.modelPath)
+        if (!file.exists() || file.length() == 0L) {
+            val err = "Model file not found at: ${params.modelPath}"
+            logEngine("[ERROR] $err")
+            KLog.e("LiteRT", err)
+            throw IllegalStateException(err)
+        }
+
+        val needsReload =
+            engine == null ||
+                activeModelPath != params.modelPath ||
+                (activeBackend != null && !activeBackend!!.startsWith(params.backend, ignoreCase = true))
+
+        if (needsReload) {
+            unloadLocked()
+            val specs = getSystemSpecs(context)
+            val fileSizeStr = formatBytes(file.length())
+            val tokenBudget = maxOf(1024, maxOf(params.contextWindow, params.maxTokens))
+
+            logEngine("[LiteRT Device] ${specs.deviceModel} (${specs.chipset}) · ${specs.cores} Cores · ${specs.abi}")
+            logEngine(
+                String.format(
+                    Locale.US,
+                    "[LiteRT Device] RAM: %.2f GB Free / %.2f GB Total (Low Memory: %b)",
+                    specs.availRamGb,
+                    specs.totalRamGb,
+                    specs.isLowMemory,
+                ),
+            )
+            logEngine("[LiteRT Engine] Model: ${file.name} ($fileSizeStr) · Target: ${params.backend} · Budget: $tokenBudget tokens")
+
+            val startInit = System.currentTimeMillis()
+            val candidateForVision = isVisionCandidate(params.modelPath)
+
+            try {
+                val targetBackend =
+                    if (params.backend.equals("CPU", ignoreCase = true)) Backend.CPU() else Backend.GPU()
+                val initTarget = if (targetBackend is Backend.GPU) "OpenCL GPU shader cache" else "CPU XNNPack engine"
+                logEngine("[LiteRT Engine] Initializing $initTarget...")
+
+                val (newEngine, visionOk) =
+                    initEngineInstance(
+                        modelPath = params.modelPath,
+                        targetBackend = targetBackend,
+                        tokenBudget = tokenBudget,
+                        tryVision = candidateForVision,
+                    )
+                engine = newEngine
+                activeBackend = params.backend
+                activeVisionSupported = visionOk
+                val initDuration = System.currentTimeMillis() - startInit
+                val visionBadge = if (visionOk) " + Vision" else " (Text Only)"
+                logEngine("[LiteRT Engine] ${params.backend}$visionBadge Initialization Successful (${initDuration}ms)")
+            } catch (e: Exception) {
+                if (!params.backend.equals("CPU", ignoreCase = true)) {
+                    logEngine("[WARN] GPU OpenCL rejected (${e.message ?: e.javaClass.simpleName}). Falling back to CPU (XNNPack)...")
+                    KLog.w("LiteRT", "GPU OpenCL rejected, falling back to CPU: ${e.message}")
+                    try {
+                        val (newEngine, visionOk) =
+                            initEngineInstance(
+                                modelPath = params.modelPath,
+                                targetBackend = Backend.CPU(),
+                                tokenBudget = tokenBudget,
+                                tryVision = candidateForVision,
+                            )
+                        engine = newEngine
+                        activeBackend = "CPU (Fallback)"
+                        activeVisionSupported = visionOk
+                        val fallbackDuration = System.currentTimeMillis() - startInit
+                        logEngine("[LiteRT Engine] CPU Fallback Successful (${fallbackDuration}ms)")
+                    } catch (cpuEx: Exception) {
+                        val failMsg = "GPU and CPU initialization failed: ${cpuEx.message ?: cpuEx.javaClass.simpleName}"
+                        logEngine("[ERROR] $failMsg")
+                        KLog.e("LiteRT", failMsg, cpuEx)
+                        throw IllegalStateException("Failed to load LiteRT model ($failMsg)", cpuEx)
+                    }
+                } else {
+                    val failMsg = "CPU initialization failed: ${e.message ?: e.javaClass.simpleName}"
+                    logEngine("[ERROR] $failMsg")
+                    KLog.e("LiteRT", failMsg, e)
+                    throw IllegalStateException("Failed to load LiteRT model ($failMsg)", e)
+                }
+            }
+            activeModelPath = params.modelPath
+            _activeBackendState.value = activeBackend
+            _isModelLoaded.value = true
+            _loadedModelPath.value = params.modelPath
+        }
+
+        return engine ?: throw IllegalStateException("Google AI Edge LiteRT-LM engine initialization failed.")
     }
 
     private fun isVisionCandidate(modelPath: String): Boolean {
@@ -544,8 +598,9 @@ class LiteRtEngineManager private constructor(
         tryVision: Boolean,
     ): Pair<Engine, Boolean> {
         if (tryVision) {
+            var visionEng: Engine? = null
             try {
-                val eng =
+                visionEng =
                     Engine(
                         EngineConfig(
                             modelPath = modelPath,
@@ -556,32 +611,27 @@ class LiteRtEngineManager private constructor(
                             cacheDir = context.cacheDir.absolutePath,
                         ),
                     )
-                eng.initialize()
+                visionEng.initialize()
                 // Verify conversation creation succeeds without TF_LITE_VISION_ENCODER missing error
                 try {
-                    val testConv = eng.createConversation()
+                    val testConv = visionEng.createConversation()
                     testConv.close()
-                    return Pair(eng, true)
+                    val ready = visionEng
+                    if (ready != null) return Pair(ready, true)
                 } catch (convEx: Throwable) {
-                    if (convEx.message?.contains("VISION_ENCODER", ignoreCase = true) == true ||
-                        convEx.message?.contains("TF_LITE_VISION", ignoreCase = true) == true
-                    ) {
-                        logEngine("[INFO] Model lacks vision encoder (${convEx.message}). Re-initializing as text LLM...")
-                        try { eng.close() } catch (e: Exception) { KLog.e("LiteRT", "Failed to close engine", e) }
-                    } else {
-                        try { eng.close() } catch (e: Exception) { KLog.e("LiteRT", "Failed to close engine", e) }
-                        throw convEx
-                    }
+                    if (!isVisionMissingError(convEx)) throw convEx
+                    logEngine("[INFO] Model lacks vision encoder (${convEx.message}). Re-initializing as text LLM...")
                 }
             } catch (initEx: Throwable) {
-                if (initEx.message?.contains("VISION_ENCODER", ignoreCase = true) == true ||
-                    initEx.message?.contains("TF_LITE_VISION", ignoreCase = true) == true
-                ) {
-                    logEngine("[INFO] Model lacks vision encoder. Re-initializing as text LLM...")
-                } else {
+                if (!isVisionMissingError(initEx)) {
+                    // Non-vision failure: release the half-built engine, then propagate.
+                    closeQuietly(visionEng)
                     throw initEx
                 }
+                logEngine("[INFO] Model lacks vision encoder. Re-initializing as text LLM...")
             }
+            // Vision attempt failed: never leak the native engine.
+            closeQuietly(visionEng)
         }
 
         // Initialize pure text LLM (visionBackend = null, maxNumImages = null)
@@ -598,6 +648,18 @@ class LiteRtEngineManager private constructor(
             )
         textEng.initialize()
         return Pair(textEng, false)
+    }
+
+    private fun isVisionMissingError(t: Throwable): Boolean =
+        t.message?.contains("VISION_ENCODER", ignoreCase = true) == true ||
+            t.message?.contains("TF_LITE_VISION", ignoreCase = true) == true
+
+    private fun closeQuietly(eng: Engine?) {
+        try {
+            eng?.close()
+        } catch (e: Exception) {
+            KLog.e("LiteRT", "Failed to close engine", e)
+        }
     }
 
     private fun unloadLocked() {

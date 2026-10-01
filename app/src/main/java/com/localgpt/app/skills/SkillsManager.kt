@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -24,6 +26,14 @@ class SkillsManager private constructor(private val context: Context) {
             instance ?: synchronized(this) {
                 instance ?: SkillsManager(context.applicationContext).also { instance = it }
             }
+
+        /**
+         * Max characters for the combined active-skill instruction block that is
+         * injected into the system prompt. Small on-device models have tight
+         * context windows; without a cap, many enabled skills could silently
+         * eat most of the window meant for the conversation.
+         */
+        private const val MAX_ACTIVE_INSTRUCTIONS_CHARS = 4000
 
         val BUILTIN_SKILLS = listOf(
             Skill(
@@ -124,6 +134,9 @@ Once search results are provided in the context, synthesize the facts directly i
     private val customSkillsFile get() = File(dir, "custom_skills.json")
     private val presetTogglesFile get() = File(dir, "preset_toggles.json")
 
+    /** Serializes read-modify-write cycles on the skill list plus their persistence. */
+    private val stateMutex = Mutex()
+
     private val _skills = MutableStateFlow<List<Skill>>(emptyList())
     val skills: StateFlow<List<Skill>> = _skills.asStateFlow()
 
@@ -182,44 +195,65 @@ Once search results are provided in the context, synthesize the facts directly i
     }
 
     suspend fun saveSkill(skill: Skill): Unit = withContext(Dispatchers.IO) {
-        val current = _skills.value.toMutableList()
-        val index = current.indexOfFirst { it.id == skill.id }
-        if (index >= 0) {
-            current[index] = skill
-        } else {
-            current.add(skill)
-        }
-        _skills.value = current
-        val customOnly = current.filterNot { it.isBuiltIn }
-        persistCustom(customOnly)
-        if (skill.isBuiltIn) {
-            persistPresetToggles()
+        stateMutex.withLock {
+            val current = _skills.value.toMutableList()
+            val index = current.indexOfFirst { it.id == skill.id }
+            if (index >= 0) {
+                current[index] = skill
+            } else {
+                current.add(skill)
+            }
+            _skills.value = current
+            val customOnly = current.filterNot { it.isBuiltIn }
+            persistCustom(customOnly)
+            if (skill.isBuiltIn) {
+                persistPresetToggles()
+            }
         }
     }
 
     suspend fun toggleSkill(id: String, isEnabled: Boolean): Unit = withContext(Dispatchers.IO) {
-        val current = _skills.value.map {
-            if (it.id == id) it.copy(isEnabled = isEnabled) else it
+        stateMutex.withLock {
+            val current = _skills.value.map {
+                if (it.id == id) it.copy(isEnabled = isEnabled) else it
+            }
+            _skills.value = current
+            persistCustom(current.filterNot { it.isBuiltIn })
+            persistPresetToggles()
         }
-        _skills.value = current
-        persistCustom(current.filterNot { it.isBuiltIn })
-        persistPresetToggles()
     }
 
     suspend fun deleteSkill(id: String): Unit = withContext(Dispatchers.IO) {
-        val current = _skills.value.filterNot { it.id == id && !it.isBuiltIn }
-        _skills.value = current
-        persistCustom(current.filterNot { it.isBuiltIn })
+        stateMutex.withLock {
+            val current = _skills.value.filterNot { it.id == id && !it.isBuiltIn }
+            _skills.value = current
+            persistCustom(current.filterNot { it.isBuiltIn })
+        }
     }
 
+    /**
+     * Builds the combined instruction block for all enabled skills.
+     * The block is capped at [MAX_ACTIVE_INSTRUCTIONS_CHARS]; whole skills
+     * that no longer fit are omitted (with a warning log) so the conversation
+     * itself keeps most of the context window.
+     */
     fun getActivePromptInstructions(): String {
         val active = _skills.value.filter { it.isEnabled && it.instructions.isNotBlank() }
         if (active.isEmpty()) return ""
         val sb = StringBuilder()
         sb.append("\n\n[ACTIVE SKILLS & SPECIALIZED DIRECTIVES]\n")
-        active.forEach { skill ->
-            sb.append("### Skill: ${skill.name}\n")
-            sb.append("${skill.instructions.trim()}\n\n")
+        val skipped = ArrayList<String>()
+        for (skill in active) {
+            val block = "### Skill: ${skill.name}\n${skill.instructions.trim()}\n\n"
+            if (sb.length + block.length > MAX_ACTIVE_INSTRUCTIONS_CHARS) {
+                skipped.add(skill.name)
+                continue
+            }
+            sb.append(block)
+        }
+        if (skipped.isNotEmpty()) {
+            sb.append("[Note: ${skipped.size} skill instruction(s) omitted to fit the model's context window: ${skipped.joinToString(", ").take(200)}]\n")
+            KLog.w("Skills", "Omitted ${skipped.size} active skill(s) — combined instructions exceed $MAX_ACTIVE_INSTRUCTIONS_CHARS chars: ${skipped.joinToString()}")
         }
         return sb.toString().trimEnd()
     }
@@ -246,6 +280,9 @@ Once search results are provided in the context, synthesize the facts directly i
                 if (parsed != null && parsed.name.isNotBlank()) {
                     val skill = parsed.copy(
                         id = UUID.randomUUID().toString(),
+                        name = parsed.name.take(80),
+                        description = parsed.description.take(200),
+                        category = parsed.category.take(30),
                         isBuiltIn = false,
                         createdAt = System.currentTimeMillis()
                     )
@@ -261,30 +298,20 @@ Once search results are provided in the context, synthesize the facts directly i
             var iconCategory = "code"
             var instructions = rawText.trim()
 
-            if (rawText.startsWith("---")) {
-                val parts = rawText.split("---", limit = 3)
-                if (parts.size >= 3) {
-                    val frontmatter = parts[1]
-                    instructions = parts[2].trim()
-
-                    frontmatter.lines().forEach { line ->
-                        val trimmed = line.trim()
-                        when {
-                            trimmed.startsWith("name:", ignoreCase = true) ->
-                                name = trimmed.substringAfter(":").trim().removeSurrounding("\"").removeSurrounding("'")
-                            trimmed.startsWith("description:", ignoreCase = true) ->
-                                description = trimmed.substringAfter(":").trim().removeSurrounding("\"").removeSurrounding("'")
-                            trimmed.startsWith("category:", ignoreCase = true) ->
-                                category = trimmed.substringAfter(":").trim().removeSurrounding("\"").removeSurrounding("'")
-                            trimmed.startsWith("icon:", ignoreCase = true) ->
-                                iconCategory = trimmed.substringAfter(":").trim().removeSurrounding("\"").removeSurrounding("'")
-                        }
-                    }
+            val frontmatter = parseFrontmatter(rawText)
+            if (frontmatter != null) {
+                val (meta, body) = frontmatter
+                instructions = body
+                meta["name"]?.let { if (it.isNotBlank()) name = it }
+                meta["description"]?.let { if (it.isNotBlank()) description = it }
+                meta["category"]?.let { if (it.isNotBlank()) category = it }
+                meta["icon"]?.let { if (it.isNotBlank()) iconCategory = it }
+            } else {
+                val trimmed = rawText.trimStart().removePrefix("\uFEFF")
+                if (trimmed.startsWith("# ")) {
+                    name = trimmed.lineSequence().first().removePrefix("# ").trim().ifBlank { name }
+                    instructions = trimmed.lines().drop(1).joinToString("\n").trim()
                 }
-            } else if (rawText.startsWith("# ")) {
-                val firstLine = rawText.lines().first()
-                name = firstLine.removePrefix("# ").trim()
-                instructions = rawText.lines().drop(1).joinToString("\n").trim()
             }
 
             val skill = Skill(
@@ -337,6 +364,40 @@ Once search results are provided in the context, synthesize the facts directly i
         }
     } catch (_: Throwable) {
         null
+    }
+
+    /**
+     * Parses a leading YAML frontmatter block delimited by `---` lines.
+     * Tolerant of leading whitespace/BOM, extra spaces around the fences,
+     * quoted values, and `#` comment lines. Returns the metadata map plus the
+     * remaining body, or null when no valid block is present. A `---`
+     * horizontal rule inside the body does not confuse it, because the closing
+     * fence must sit alone on its own line.
+     */
+    private fun parseFrontmatter(rawText: String): Pair<Map<String, String>, String>? {
+        val text = rawText.trimStart().removePrefix("\uFEFF")
+        val lines = text.lines()
+        if (lines.isEmpty() || lines.first().trim() != "---") return null
+        val closing = lines.drop(1).indexOfFirst { it.trim() == "---" }
+        if (closing < 0) return null
+        val meta = mutableMapOf<String, String>()
+        for (line in lines.drop(1).take(closing)) {
+            val t = line.trim()
+            if (t.isEmpty() || t.startsWith("#")) continue
+            val colon = t.indexOf(':')
+            if (colon <= 0) continue
+            val key = t.substring(0, colon).trim().lowercase()
+            var value = t.substring(colon + 1).trim()
+            if (value.length >= 2 &&
+                ((value.startsWith("\"") && value.endsWith("\"")) ||
+                    (value.startsWith("'") && value.endsWith("'")))
+            ) {
+                value = value.substring(1, value.length - 1)
+            }
+            if (key.isNotEmpty()) meta[key] = value
+        }
+        val body = lines.drop(closing + 2).joinToString("\n").trim()
+        return meta to body
     }
 
     private fun String.capitalizeWords(): String =

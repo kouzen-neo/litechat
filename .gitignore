@@ -22,6 +22,11 @@ build/
 # Local configuration file (sdk.dir, etc)
 local.properties
 
+# Signing keys & passwords must never be committed
+*.keystore
+*.jks
+*.p12
+
 # Proguard / R8 generated dumps
 proguard/
 
