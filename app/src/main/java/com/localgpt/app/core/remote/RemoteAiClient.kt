@@ -142,7 +142,7 @@ object RemoteAiClient {
             // Close the connection promptly when the collecting coroutine is
             // cancelled, instead of blocking in readLine() until the next
             // chunk or socket timeout.
-            currentCoroutineContext()[Job]?.invokeOnCancellation {
+            currentCoroutineContext()[Job]?.invokeOnCompletion {
                 try {
                     response.close()
                 } catch (_: Exception) {
