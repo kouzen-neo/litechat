@@ -16,11 +16,19 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install Android 36 platform + build-tools
+      - name: Install Android 36 platform + build-tools (+ android-37 shim)
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0"
+          # Shim: Google has not published the android-37 platform publicly
+          # (verified 2026-10-01: not in repository2-1.xml), but the Compose
+          # 1.12.0-beta01 / material3 1.5.0-alpha25 / material-kolor 5.0.0
+          # artifacts declare compileSdk 37 in their AAR metadata, and AGP 9
+          # enforces it. Provide android-37 as android-36's APIs — the app
+          # uses no API 37+ calls, so compilation is unaffected.
+          cp -r "$ANDROID_HOME/platforms/android-36" "$ANDROID_HOME/platforms/android-37"
+          ls "$ANDROID_HOME/platforms/"
 
       - name: Build release APK (arm64-v8a)
         env:

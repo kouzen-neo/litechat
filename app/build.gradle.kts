@@ -5,12 +5,13 @@ plugins {
 
 android {
     namespace = "com.localgpt.app"
-    // compileSdk 36: the newest platform Google has published publicly
-    // (android-37 does not exist in the public SDK repository as of 2026-10-01).
-    // Some dependencies (compose material3 1.5.0-alpha25, material-kolor 5.0.0)
-    // were built against 37, so the strict AAR metadata check is disabled in
-    // gradle.properties (android.enableNewAarMetadataCheck=false).
-    compileSdk = 36
+    // compileSdk 37: required by the Compose 1.12.0-beta01 / material3
+    // 1.5.0-alpha25 / material-kolor 5.0.0 artifacts' AAR metadata (AGP 9
+    // enforces it). Google has not published the android-37 platform
+    // publicly, so CI provides android-37 as android-36's APIs (see the
+    // android-37 shim in .github/workflows/build-apk.yml). The app itself
+    // uses no API 37+ calls; targetSdk stays 36.
+    compileSdk = 37
 
     // -PabiFilter=arm64-v8a -> single-ABI APK; without flag -> all ABIs + universal
     val abiFilter =
