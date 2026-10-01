@@ -258,7 +258,7 @@ class ChatViewModel(
         }
         val imageModel = s.remoteImageModelId.ifBlank { s.remoteModelId }
         if (imageModel.isBlank()) {
-            errorMessage.value = "Pilih image model dulu di tab Models."
+            errorMessage.value = "Pick an image model in the Models tab first."
             return
         }
         if (isGenerating.value || imageGenState.value != null) return
@@ -327,7 +327,7 @@ class ChatViewModel(
     fun summarizeUrl(rawUrl: String) {
         if (isGenerating.value || urlFetchState.value != null) return
         if (UrlSummarizer.normalizeUrl(rawUrl) == null) {
-            errorMessage.value = "URL tidak valid. Contoh: https://example.com/artikel"
+            errorMessage.value = "Invalid URL. Example: https://example.com/article"
             return
         }
         viewModelScope.launch {
@@ -339,12 +339,12 @@ class ChatViewModel(
                     urlFetchState.value = null
                 }
             if (page == null) {
-                errorMessage.value = "Gagal mengambil halaman. Periksa URL atau koneksi internet."
+                errorMessage.value = "Failed to fetch the page. Check the URL or your internet connection."
                 return@launch
             }
             sendMessage(
                 "Ringkas halaman web berikut.\nJudul: ${page.title}\nURL: ${page.url}\n\n" +
-                    "Berikan ringkasan dalam Bahasa Indonesia dengan poin-poin penting:\n\n${page.text}",
+                    "Provide a summary in English with key bullet points:\n\n${page.text}",
             )
         }
     }
@@ -897,7 +897,7 @@ class ChatViewModel(
                         if (s.customModelPath.isNotBlank()) "custom:${s.customModelPath}" else s.activeModelId
             }
         if (id.isBlank()) {
-            errorMessage.value = "Pilih model dulu sebelum pin."
+            errorMessage.value = "Pick a model before pinning."
             return
         }
         conv.pinnedModelSource = src
@@ -1290,7 +1290,7 @@ class ChatViewModel(
         } else {
             // Show status while waiting for the explicit approval gate.
             if (currentConversationId == targetChatId && idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                messages[idx] = messages[idx].copy(content = "🔧 Requesting approval to run `${tool.name}`…")
+                messages[idx] = messages[idx].copy(content = "Requesting approval to run `${tool.name}`…")
             }
             val req =
                 com.localgpt.app.mcp.McpCallRequest(
@@ -1310,7 +1310,7 @@ class ChatViewModel(
                         "Explain briefly and ask how they'd like to continue."
                 } else {
                     if (currentConversationId == targetChatId && idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
-                        messages[idx] = messages[idx].copy(content = "🔧 Running `${tool.name}`…")
+                        messages[idx] = messages[idx].copy(content = "Running `${tool.name}`…")
                     }
                     val result =
                         runCatching { mcpManager.callTool(tool.serverId, tool.name, call.arguments) }
@@ -1406,7 +1406,7 @@ class ChatViewModel(
             cancelAllReminders(app)
             appendLocalExchange(
                 trimmed,
-                "✅ Semua pengingat yang dijadwalkan sudah dibatalkan.",
+                "All scheduled reminders have been cancelled.",
             )
             return true
         }
@@ -1417,7 +1417,7 @@ class ChatViewModel(
                 .format(java.util.Date(spec.triggerAtMillis))
         appendLocalExchange(
             trimmed,
-            "⏰ Pengingat diset untuk $whenStr:\n\"${spec.note}\"",
+            "Reminder set for $whenStr:\n\"${spec.note}\"",
         )
         return true
     }
@@ -2172,11 +2172,11 @@ class ChatViewModel(
     /** Short display name of the currently active model (compare label A). */
     private fun activeModelLabel(s: Settings): String =
         if (s.modelSource == ChatConstants.SOURCE_REMOTE) {
-            "🌐 ${s.remoteModelId.ifBlank { "remote" }}"
+            "[Remote] ${s.remoteModelId.ifBlank { "remote" }}"
         } else {
             val path = ChatServerService.resolveModelPath(app, s)
             val name = path?.let { File(it).nameWithoutExtension }.orEmpty()
-            "📱 ${name.ifBlank { s.activeModelId.ifBlank { "local" } }}"
+            "[On-device] ${name.ifBlank { s.activeModelId.ifBlank { "local" } }}"
         }
 
     /**
@@ -2193,7 +2193,7 @@ class ChatViewModel(
                 ComparePass(
                     settings = s.copy(modelSource = ChatConstants.SOURCE_REMOTE, remoteModelId = s.compareModelId),
                     labelA = labelA,
-                    labelB = "🌐 ${s.compareModelId}",
+                    labelB = "[Remote] ${s.compareModelId}",
                 )
             }
             ChatConstants.SOURCE_LOCAL -> {
@@ -2205,7 +2205,7 @@ class ChatViewModel(
                 ComparePass(
                     settings = s.copy(modelSource = ChatConstants.SOURCE_LOCAL, customModelPath = path),
                     labelA = labelA,
-                    labelB = "📱 ${File(path).nameWithoutExtension.ifBlank { "local" }}",
+                    labelB = "[On-device] ${File(path).nameWithoutExtension.ifBlank { "local" }}",
                 )
             }
             else -> null
@@ -2266,7 +2266,7 @@ class ChatViewModel(
         val merged =
             a.copy(
                 variants = variants + b.content,
-                stats = "${a.stats} · ⚖️ ${pass.labelA} vs ${pass.labelB}",
+                stats = "${a.stats} · A/B: ${pass.labelA} vs ${pass.labelB}",
             )
         messages[aIdx] = merged
         registerActiveChild(merged)
@@ -2344,9 +2344,9 @@ class ChatViewModel(
                 onResult(
                     result.fold(
                         onSuccess = {
-                            if (it.isError) "⚠️ Tool returned an error:\n${it.text}" else "✅ Result:\n${it.text}"
+                            if (it.isError) "Tool returned an error:\n${it.text}" else "Result:\n${it.text}"
                         },
-                        onFailure = { "❌ Call failed: ${it.message}" },
+                        onFailure = { "Call failed: ${it.message}" },
                     ),
                 )
             }
@@ -2503,7 +2503,7 @@ class ChatViewModel(
                 // mis. file model tidak ada. Tampilkan sebagai pesan error biasa.
                 KLog.e("ChatViewModel", "loadActiveModel failed", e)
                 withContext(Dispatchers.Main) {
-                    errorMessage.value = "Gagal memuat model: ${e.message}"
+                    errorMessage.value = "Failed to load model: ${e.message}"
                 }
             }
         }

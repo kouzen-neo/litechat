@@ -63,9 +63,9 @@ internal fun showReminderNotification(context: Context, note: String) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         val channel = NotificationChannel(
             REMINDER_CHANNEL_ID,
-            "Pengingat",
+            "Reminder",
             NotificationManager.IMPORTANCE_HIGH,
-        ).apply { description = "Pengingat terjadwal dari LiteChat" }
+        ).apply { description = "Scheduled reminder from LiteChat" }
         notificationManager.createNotificationChannel(channel)
     }
     val openIntent = Intent(context, MainActivity::class.java).apply {
@@ -79,13 +79,13 @@ internal fun showReminderNotification(context: Context, note: String) {
     )
     val notification = NotificationCompat.Builder(context, REMINDER_CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_reminder)
-        .setContentTitle("Pengingat LiteChat")
+        .setContentTitle("LiteChat Reminder")
         .setContentText(note)
         .setStyle(NotificationCompat.BigTextStyle().bigText(note))
         .setPriority(NotificationCompat.PRIORITY_HIGH)
         .setAutoCancel(true)
         .setContentIntent(openPendingIntent)
-        .addAction(R.drawable.ic_reminder, "Buka aplikasi", openPendingIntent)
+        .addAction(R.drawable.ic_reminder, "Open app", openPendingIntent)
         .build()
     // ID unik per notifikasi agar beberapa pengingat tidak saling menimpa.
     val notificationId = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()

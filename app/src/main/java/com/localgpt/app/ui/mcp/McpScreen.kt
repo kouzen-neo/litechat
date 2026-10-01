@@ -170,7 +170,7 @@ fun McpScreen(
                                 )
                                 if (server.hasToken) {
                                     Text(
-                                        "🔑 token saved (encrypted)",
+                                        "Token saved (encrypted)",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
                                     )
@@ -184,7 +184,7 @@ fun McpScreen(
                         if (error != null) {
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "⚠️ $error",
+                                "$error",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error,
                             )

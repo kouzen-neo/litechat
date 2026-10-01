@@ -10,11 +10,11 @@ import com.localgpt.app.MainActivity
 import com.localgpt.app.R
 
 /**
- * Home screen widget "Tanya LiteChat".
+ * Home screen widget "Ask LiteChat".
  *
- * Satu tombol membuka [MainActivity] dengan extra [EXTRA_PREFILL_PROMPT]
- * berisi teks prefill (diatur lewat [WidgetConfigActivity]), sehingga pengguna
- * tinggal menekan kirim di layar chat.
+ * One button opens [MainActivity] with the [EXTRA_PREFILL_PROMPT] extra
+ * carrying prefill text (set via [WidgetConfigActivity]), so the user
+ * just hits send on the chat screen.
  */
 class LiteChatWidgetProvider : AppWidgetProvider() {
 

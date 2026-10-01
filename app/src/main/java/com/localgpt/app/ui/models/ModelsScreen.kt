@@ -669,7 +669,7 @@ fun ModelsScreen(
                                     fontWeight = FontWeight.Bold,
                                 )
                                 Text(
-                                    "Perkiraan akumulasi biaya API remote (OpenRouter pricing).",
+                                    "Estimated accumulated remote API cost (OpenRouter pricing).",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -839,7 +839,7 @@ fun ModelsScreen(
                                 fontWeight = FontWeight.Bold,
                             )
                             Text(
-                                "Model ID for /v1/images/generations (e.g. an OpenRouter image model). Kosongkan untuk memakai model chat aktif.",
+                                "Model ID for /v1/images/generations (e.g. an OpenRouter image model). Leave empty to use the active chat model.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

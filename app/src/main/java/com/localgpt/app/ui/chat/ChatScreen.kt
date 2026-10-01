@@ -65,6 +65,7 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Check
@@ -227,7 +228,7 @@ fun ChatScreen(
 
     var input by remember { mutableStateOf("") }
 
-    // Widget prefill: "Tanya LiteChat" home-screen widget delivers a prompt via
+    // Widget prefill: "Ask LiteChat" home-screen widget delivers a prompt via
     // MainActivity's intent extra; consume it once into the composer.
     val pendingPrefill by viewModel.pendingPrefill
     LaunchedEffect(pendingPrefill) {
@@ -361,7 +362,7 @@ fun ChatScreen(
         val pin = modelPin
         if (pin != null) {
             val (_, id) = pin
-            "📌 " + shortModelLabel(id)
+            shortModelLabel(id)
         } else if (settings.modelSource == ChatConstants.SOURCE_REMOTE) {
             shortModelLabel(settings.remoteModelId.ifBlank { "Ollama (LAN)" })
         } else {
@@ -1007,6 +1008,15 @@ fun ChatScreen(
                                             verticalAlignment = Alignment.CenterVertically,
                                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                         ) {
+                                            if (modelPin != null) {
+                                                Icon(
+                                                    imageVector = PushPin,
+                                                    contentDescription = "Pinned model",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(12.dp),
+                                                )
+                                                Spacer(Modifier.width(3.dp))
+                                            }
                                             Text(
                                                 text = modelDisplayName.take(16) + if (modelDisplayName.length > 16) "…" else "",
                                                 style = MaterialTheme.typography.labelSmall,
@@ -1390,7 +1400,18 @@ fun ChatScreen(
     if (showCompareDialog) {
         AlertDialog(
             onDismissRequest = { showCompareDialog = false },
-            title = { Text("⚖️ Compare Mode") },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = CompareArrows,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Compare Mode")
+                }
+            },
             text = {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1402,7 +1423,7 @@ fun ChatScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
-                            "Jalankan tiap prompt di 2 model",
+                            "Run every prompt on 2 models",
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.weight(1f),
                         )
@@ -1412,7 +1433,7 @@ fun ChatScreen(
                         )
                     }
                     Text(
-                        "Model A = model aktif. Pilih model B (challenger):",
+                        "Model A = active model. Pick model B (challenger):",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -1493,14 +1514,14 @@ fun ChatScreen(
                         }
                         if (installedModels.isEmpty() && remoteModels.isEmpty()) {
                             Text(
-                                "Belum ada model. Unduh di Models Hub dulu.",
+                                "No models yet. Download one in Models Hub first.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
                     Text(
-                        "Hasil B muncul sebagai varian ke-2 (geser 1/2) dengan label ⚖️ di bawah pesan.",
+                        "Result B appears as variant 2 (swipe 1/2) with the compare label under the message.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1520,7 +1541,18 @@ fun ChatScreen(
                 ?.signature ?: mcpApprovalReq.toolName
         AlertDialog(
             onDismissRequest = { viewModel.respondMcpApproval(false) },
-            title = { Text("🔧 Allow tool call?") },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Build,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Allow tool call?")
+                }
+            },
             text = {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1624,7 +1656,7 @@ fun ChatScreen(
                     }
                     val imgModel = settings.remoteImageModelId.ifBlank { settings.remoteModelId }
                     Text(
-                        if (imgModel.isBlank()) "Pilih image model di tab Models dulu."
+                        if (imgModel.isBlank()) "Pick an image model in the Models tab first."
                         else "Model: $imgModel",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

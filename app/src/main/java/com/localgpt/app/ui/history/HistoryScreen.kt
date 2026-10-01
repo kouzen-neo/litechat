@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tag
@@ -530,9 +531,11 @@ fun HistoryScreen(
                                     )
                                     if (conv.hasPinnedModel) {
                                         Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            "📌",
-                                            style = MaterialTheme.typography.labelSmall,
+                                        Icon(
+                                            imageVector = PushPin,
+                                            contentDescription = "Pinned model",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(12.dp),
                                         )
                                     }
                                 }

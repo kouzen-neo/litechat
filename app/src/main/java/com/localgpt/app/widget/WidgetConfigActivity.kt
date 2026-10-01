@@ -10,10 +10,10 @@ import android.widget.EditText
 import com.localgpt.app.R
 
 /**
- * Layar konfigurasi widget "Tanya LiteChat".
+ * "Ask LiteChat" widget configuration screen.
  *
- * Pengguna mengisi teks prefill yang akan otomatis terisi di kolom chat
- * saat tombol widget diketuk. Dikosongkan = membuka chat biasa.
+ * The user fills in prefill text that auto-fills the chat box
+ * when the widget button is tapped. Left empty = opens a normal chat.
  */
 class WidgetConfigActivity : Activity() {
 
@@ -21,7 +21,7 @@ class WidgetConfigActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Batal demi default: widget tidak jadi ditambahkan bila pengguna mundur.
+        // Cancel by default: the widget is not added if the user backs out.
         setResult(RESULT_CANCELED)
 
         appWidgetId = intent?.extras?.getInt(
