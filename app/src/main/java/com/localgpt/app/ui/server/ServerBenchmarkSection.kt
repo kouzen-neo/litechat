@@ -126,16 +126,6 @@ internal fun ServerBenchmarkSection(viewModel: ChatViewModel) {
     }
 }
 
-@Composable
-private fun ServerControlCard(viewModel: ChatViewModel) {
-    val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
-    val settings by viewModel.settings.collectAsState()
-    val serverStatus by viewModel.serverStatus.collectAsState()
-    val requestCount by OpenAiServer.requestCount.collectAsState()
-    val isRunning = serverStatus is OpenAiServer.Status.Running
-    val lanIp = remember { NetworkUtils.getLocalIpAddress(context) ?: "127.0.0.1" }
-    val serverEndpoint = "http://$lanIp:${settings.serverPort}/v1"
 /* Embedded OpenAI-Compatible Server Card */
 @Composable
 private fun ServerControlCard(viewModel: ChatViewModel) {
