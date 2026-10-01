@@ -14,6 +14,14 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
+/** A file attached to a message: an image for vision, or a document whose text is injected. */
+data class ChatAttachment(
+    val type: String = "image", // "image" | "file"
+    val path: String = "", // absolute path inside app storage
+    val name: String = "",
+    val mimeType: String? = null,
+)
+
 data class ChatMessageEntry(
     val role: String, // "user" | "assistant"
     val content: String,
@@ -21,7 +29,8 @@ data class ChatMessageEntry(
     val stats: String? = null, // e.g. "18.2 tok/s · 154 tokens · GPU"
     val variants: List<String> = emptyList(),
     val selectedVariant: Int = 0,
-    val imagePath: String? = null,
+    val imagePath: String? = null, // legacy single-image attachment (kept for old conversations)
+    val attachments: List<ChatAttachment> = emptyList(), // multi-attachment (images + files)
     val id: String? = UUID.randomUUID().toString(), // stable node id for conversation branching
     val parentId: String? = null, // previous node in the tree; null = root child
     val sources: List<String>? = null, // RAG citation labels e.g. ["notes.txt #2"]
@@ -36,6 +45,10 @@ data class Conversation(
     var branchActive: MutableMap<String, String>? = null, // parentKey ("root"|nodeId) -> active childId
     var summary: String? = null, // rolling compressed-memory summary (context compression)
     var summarizedUntilId: String? = null, // id of the last message folded into the summary
+    var pinnedModelSource: String? = null, // "local" | "remote" — null = follow global setting
+    var pinnedModelId: String? = null, // local model id or remote model id pinned to this conversation
+    var folder: String = "", // user folder name; "" = no folder
+    var tags: List<String> = emptyList(), // user tags; a conversation can carry several (unlike folder)
 )
 
 /** Lightweight conversation metadata for fast listings without parsing message bodies (P6). */
@@ -46,6 +59,9 @@ data class ConversationHeader(
     val updatedAt: Long = 0L,
     val messageCount: Int = 0,
     val lastMessagePreview: String = "",
+    val folder: String = "",
+    val hasPinnedModel: Boolean = false,
+    val tags: List<String> = emptyList(),
 )
 
 private val conversationIdPattern = Regex("^[A-Za-z0-9-]+$")
@@ -61,8 +77,19 @@ internal fun Conversation.toHeader(): ConversationHeader {
         updatedAt = updatedAt,
         messageCount = messages.size,
         lastMessagePreview = preview,
+        folder = (folder as String?).orEmpty(),
+        hasPinnedModel = !pinnedModelId.isNullOrBlank(),
+        tags = sanitizeTags(tags),
     )
 }
+
+/** Canonical tag form: trimmed, non-blank, capped in count and length. */
+internal fun sanitizeTags(tags: List<String>?): List<String> =
+    tags.orEmpty()
+        .map { it.trim().take(24) }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .take(10)
 
 /** True when [id] is safe to embed verbatim in a file name (B28). */
 internal fun isValidConversationId(id: String): Boolean = conversationIdPattern.matches(id)
@@ -206,7 +233,7 @@ class ChatRepository(
                             // even for files predating the index (Gson ignores unknown fields
                             // when parsing as header, which would zero the new fields).
                             val full = gson.fromJson(file.readText(), Conversation::class.java)
-                            merged.add(full.toHeader().copy(id = id))
+                            merged.add(normalize(full).toHeader().copy(id = id))
                             changed = true
                         } catch (e: Exception) {
                             KLog.w("ChatRepository", "Skipping unreadable conversation file ${file.name}: ${e.message}")
@@ -222,8 +249,12 @@ class ChatRepository(
         try {
             val f = indexFile()
             if (f.exists()) {
-                gson.fromJson(f.readText(), object : TypeToken<List<ConversationHeader>>() {}.type)
-                    ?: emptyList()
+                val parsed: List<ConversationHeader> =
+                    gson.fromJson(f.readText(), object : TypeToken<List<ConversationHeader>>() {}.type)
+                        ?: emptyList()
+                // Legacy index files predate folder/tags: Gson leaves them as
+                // JVM nulls, which would NPE on first access.
+                parsed.map { normalizeHeader(it) }
             } else {
                 emptyList()
             }
@@ -231,6 +262,22 @@ class ChatRepository(
             KLog.w("ChatRepository", "Failed to read conversation index: ${e.message}")
             emptyList()
         }
+
+    /**
+     * Repairs a header parsed from a legacy index file. Fields added after the
+     * index was written arrive as JVM nulls via Gson.
+     */
+    private fun normalizeHeader(h: ConversationHeader): ConversationHeader {
+        @Suppress("SENSELESS_COMPARISON")
+        val folderNull = h.folder == null
+        @Suppress("SENSELESS_COMPARISON", "UNCHECKED_CAST")
+        val tagsNull = (h.tags as List<String>?) == null
+        if (!folderNull && !tagsNull) return h
+        return h.copy(
+            folder = (h.folder as String?).orEmpty(),
+            tags = sanitizeTags(h.tags),
+        )
+    }
 
     private fun writeIndex(entries: List<ConversationHeader>) {
         if (!writeAtomically(indexFile(), gson.toJson(entries))) {
@@ -361,6 +408,11 @@ class ChatRepository(
 
         @Suppress("SENSELESS_COMPARISON", "USELESS_IS_CHECK")
         fun normalize(conv: Conversation): Conversation {
+            // Gson bypasses the Kotlin constructor for legacy JSON: fields added
+            // later (folder, tags) arrive as JVM nulls. Repair before use.
+            @Suppress("SENSELESS_COMPARISON")
+            if (conv.folder == null) conv.folder = ""
+            conv.tags = sanitizeTags(conv.tags)
             val msgs = conv.messages
             if (msgs.isEmpty()) return conv
             var changed = false

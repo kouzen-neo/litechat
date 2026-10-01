@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:padding="8dp"
+    android:background="@drawable/widget_background">
+
+    <TextView
+        android:id="@+id/widget_title"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:paddingStart="4dp"
+        android:text="LiteChat"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <Button
+        android:id="@+id/widget_ask_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Tanya"
+        android:textAllCaps="false" />
+
+</LinearLayout>

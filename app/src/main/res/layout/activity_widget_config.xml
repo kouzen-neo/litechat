@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Teks prefill widget"
+        android:textSize="18sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Teks ini akan otomatis terisi di kolom chat saat tombol widget diketuk. Kosongkan untuk membuka chat biasa." />
+
+    <EditText
+        android:id="@+id/config_prefill_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:hint="cth: Jelaskan dengan bahasa sederhana…"
+        android:inputType="textMultiLine"
+        android:minLines="2" />
+
+    <Button
+        android:id="@+id/config_save_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Simpan" />
+
+</LinearLayout>

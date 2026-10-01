@@ -23,6 +23,12 @@ data class RemoteModelItem(
     val description: String = "",
 )
 
+/** Per-token USD pricing for a remote model (e.g. from OpenRouter). */
+data class ModelPricing(
+    val promptPerToken: Double,
+    val completionPerToken: Double,
+)
+
 /**
  * A single chat message for a remote OpenAI-compatible request.
  *
@@ -189,6 +195,38 @@ object RemoteAiClient {
         }
     }
 
+    /**
+     * Parses OpenRouter `/api/v1/models` output into per-token USD pricing.
+     * `pricing.prompt` / `pricing.completion` are strings like "0.0000008"
+     * (USD per token).
+     */
+    internal fun parseOpenRouterPricing(modelsJson: String): Map<String, ModelPricing> {
+        val out = mutableMapOf<String, ModelPricing>()
+        try {
+            val data = JSONObject(modelsJson).optJSONArray("data") ?: return out
+            for (i in 0 until data.length()) {
+                val obj = data.getJSONObject(i)
+                val id = obj.optString("id", "").takeIf { it.isNotBlank() } ?: continue
+                val pricing = obj.optJSONObject("pricing") ?: continue
+                val prompt = pricing.optString("prompt", "0").toDoubleOrNull() ?: 0.0
+                val completion = pricing.optString("completion", "0").toDoubleOrNull() ?: 0.0
+                if (prompt > 0 || completion > 0) {
+                    out[id] = ModelPricing(prompt, completion)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    /** Fetches per-token pricing from OpenRouter; empty map for other backends. */
+    suspend fun fetchOpenRouterPricing(baseUrl: String, apiKey: String = ""): Map<String, ModelPricing> =
+        withContext(Dispatchers.IO) {
+            if (!baseUrl.lowercase().contains("openrouter.ai")) return@withContext emptyMap()
+            val body = getJson("https://openrouter.ai/api/v1/models", apiKey) ?: return@withContext emptyMap()
+            parseOpenRouterPricing(body)
+        }
+
     /** Parses OpenRouter `/api/v1/models` output for a matching model id. */
     internal fun parseOpenRouterContextWindow(modelsJson: String, modelId: String): Int? {
         return try {
@@ -267,6 +305,79 @@ object RemoteAiClient {
                 }
             } catch (e: Exception) {
                 KLog.e("RemoteAiClient", "Failed to fetch models: ${e.message}", e)
+                Result.failure(e)
+            }
+        }
+
+    /**
+     * Generates an image via an OpenAI-compatible `/v1/images/generations`
+     * endpoint (e.g. OpenRouter image models). Requests `b64_json` and falls
+     * back to downloading `url` when the server returns one instead.
+     * Returns the raw image bytes (PNG/JPEG as served).
+     */
+    suspend fun generateImage(
+        baseUrl: String,
+        apiKey: String = "",
+        model: String,
+        prompt: String,
+        size: String = "1024x1024",
+    ): Result<ByteArray> =
+        withContext(Dispatchers.IO) {
+            try {
+                val cleanUrl = baseUrl.trimEnd('/')
+                val url =
+                    if (cleanUrl.endsWith("/v1")) "$cleanUrl/images/generations"
+                    else "$cleanUrl/v1/images/generations"
+                val payload =
+                    JSONObject()
+                        .put("model", model)
+                        .put("prompt", prompt)
+                        .put("size", size)
+                        .put("response_format", "b64_json")
+                        .toString()
+                val reqBuilder =
+                    Request.Builder()
+                        .url(url)
+                        .post(payload.toRequestBody(JSON_MEDIA_TYPE))
+                if (apiKey.isNotBlank()) {
+                    reqBuilder.addHeader("Authorization", "Bearer $apiKey")
+                }
+                client.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        val errBody = resp.body?.string().orEmpty().take(300)
+                        return@withContext Result.failure(
+                            Exception("HTTP ${resp.code}: ${errBody.ifBlank { resp.message }}"),
+                        )
+                    }
+                    val body = resp.body?.string() ?: "{}"
+                    val data = JSONObject(body).optJSONArray("data") ?: JSONArray()
+                    if (data.length() == 0) {
+                        return@withContext Result.failure(Exception("Empty image response"))
+                    }
+                    val first = data.getJSONObject(0)
+                    val b64 = first.optString("b64_json", "")
+                    if (b64.isNotBlank()) {
+                        return@withContext Result.success(
+                            android.util.Base64.decode(b64, android.util.Base64.DEFAULT),
+                        )
+                    }
+                    val imageUrl = first.optString("url", "")
+                    if (imageUrl.isNotBlank()) {
+                        val imgReq = Request.Builder().url(imageUrl).get().build()
+                        client.newCall(imgReq).execute().use { imgResp ->
+                            if (!imgResp.isSuccessful) {
+                                return@withContext Result.failure(Exception("Image download HTTP ${imgResp.code}"))
+                            }
+                            val bytes = imgResp.body?.bytes()
+                            if (bytes != null && bytes.isNotEmpty()) {
+                                return@withContext Result.success(bytes)
+                            }
+                        }
+                    }
+                    Result.failure(Exception("No image data in response"))
+                }
+            } catch (e: Exception) {
+                KLog.e("RemoteAiClient", "Image generation failed: ${e.message}", e)
                 Result.failure(e)
             }
         }

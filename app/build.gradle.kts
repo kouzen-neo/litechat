@@ -144,6 +144,9 @@ dependencies {
     // DataStore (settings)
     implementation("androidx.datastore:datastore-preferences:1.1.2")
 
+    // WorkManager (pengingat terjadwal)
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
+
     // EncryptedSharedPreferences (sensitive tokens: API keys, HF token, server auth)
     implementation("androidx.security:security-crypto:1.0.0")
 

@@ -6,6 +6,7 @@ import androidx.compose.ui.text.style.TextAlign
 import com.localgpt.app.data.ChatConstants
 import com.localgpt.app.data.effectiveRemoteContextWindow
 import com.localgpt.app.data.parseRemoteModelContextWindows
+import com.localgpt.app.data.parseRemoteModelPricing
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -42,6 +43,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SecondaryTabRow
@@ -93,6 +95,10 @@ fun ModelsScreen(
     val remoteModels by viewModel.remoteModels
     val isFetchingRemoteModels by viewModel.isFetchingRemoteModels
     val isDetectingContextWindow by viewModel.isDetectingContextWindow
+    val remoteSpendUsd by viewModel.remoteSpendUsd
+    val pricingMap = remember(settings.remoteModelPricingJson) {
+        parseRemoteModelPricing(settings.remoteModelPricingJson)
+    }
 
     val freeDiskBytes by viewModel.freeDiskSpaceBytes
     val freeDiskGb = freeDiskBytes / (1024.0 * 1024.0 * 1024.0)
@@ -639,6 +645,50 @@ fun ModelsScreen(
                     }
                 }
             } else {
+                // ── Estimated Remote Spend Card ──
+                item(key = "remote_spend_card") {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Estimated Remote Spend",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    "Perkiraan akumulasi biaya API remote (OpenRouter pricing).",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                text = "$%.4f".format(remoteSpendUsd),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        if (remoteSpendUsd > 0) {
+                            Row(
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp).fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                            ) {
+                                TextButton(onClick = { viewModel.resetRemoteSpend() }) {
+                                    Text("Reset")
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── Remote Provider Setup Card ──
                 item(key = "remote_provider_card") {
                     Card(
@@ -746,6 +796,17 @@ fun ModelsScreen(
                                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                         fontSize = 10.sp,
                                                     )
+                                                    pricingMap[item.id]?.let { pricing ->
+                                                        Text(
+                                                            text = "%.2f / %.2f per 1M tokens".format(
+                                                                pricing.promptPerToken * 1_000_000,
+                                                                pricing.completionPerToken * 1_000_000,
+                                                            ),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.tertiary,
+                                                            fontSize = 10.sp,
+                                                        )
+                                                    }
                                                 }
                                                 if (isSelected) {
                                                     Surface(color = MaterialTheme.colorScheme.primary, shape = RoundedCornerShape(50)) {
@@ -764,6 +825,27 @@ fun ModelsScreen(
                                     }
                                 }
                             }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+                            // ── Image Generation Model ──
+                            Text(
+                                "Image Generation Model",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                "Model ID for /v1/images/generations (e.g. an OpenRouter image model). Kosongkan untuk memakai model chat aktif.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = settings.remoteImageModelId,
+                                onValueChange = { viewModel.setRemoteImageModelId(it) },
+                                label = { Text("Image model ID (optional)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
 
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
                             // ── Remote Context Window ──

@@ -17,6 +17,12 @@
 -keep class com.localgpt.app.web.** { *; }
 -keep class com.localgpt.app.rag.** { *; }
 -keep class com.localgpt.app.artifacts.** { *; }
+-keep class com.localgpt.app.mcp.** { *; }
 -keep class com.materialkolor.** { *; }
+# WorkManager: ReminderWorker diinstansiasi via reflection oleh WorkerFactory bawaan
+-keep class com.localgpt.app.reminder.ReminderWorker {
+    public <init>(android.content.Context, androidx.work.WorkerParameters);
+}
+
 -keepattributes Signature
 -keepattributes *Annotation*

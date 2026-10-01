@@ -18,6 +18,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import org.json.JSONObject
@@ -53,6 +55,7 @@ data class Settings(
     val remoteBaseUrl: String = "http://192.168.1.100:11434",
     val remoteApiKey: String = "",
     val remoteModelId: String = "",
+    val remoteImageModelId: String = "", // image-generation model for /v1/images/generations
     /**
      * Remote context window. Independent from the on-device
      * [contextWindowTokens] so switching back to local restores the local
@@ -62,6 +65,25 @@ data class Settings(
     val remoteContextWindowTokens: Int = 8192,
     /** JSON object: remote model id → context window tokens override. */
     val remoteModelContextWindowsJson: String = "{}",
+    /** JSON object: remote model id → {"p": prompt $/token, "c": completion $/token}. */
+    val remoteModelPricingJson: String = "{}",
+    /** Cumulative estimated remote API spend, in USD micro-units (1e-6). */
+    val remoteSpendMicros: Long = 0L,
+    // Compare mode: run each prompt on the active model (A) and a challenger (B)
+    /** Master switch for compare mode. */
+    val compareMode: Boolean = false,
+    /** Challenger model source: "local" | "remote" | "" (unset). */
+    val compareSource: String = "",
+    /**
+     * Challenger model id: remote model id, or absolute local model path
+     * ("" = active model of [compareSource]).
+     */
+    val compareModelId: String = "",
+    // MCP (Model Context Protocol) client
+    /** Master switch for MCP tool use in chat. Default off: tools only run with explicit setup. */
+    val mcpEnabled: Boolean = false,
+    /** JSON array of [com.localgpt.app.mcp.McpServerConfig]. */
+    val mcpServersJson: String = "[]",
     // Model downloads
     val huggingFaceToken: String = "",
     // Embedded OpenAI-compatible server
@@ -114,6 +136,40 @@ fun remoteModelContextWindowsToJson(map: Map<String, Int>): String {
 }
 
 /**
+ * Parses cached per-model pricing JSON
+ * (`{ "<modelId>": {"p": <$/token prompt>, "c": <$/token completion>}, ... }`).
+ * Malformed entries are ignored.
+ */
+fun parseRemoteModelPricing(json: String): Map<String, com.localgpt.app.core.remote.ModelPricing> {
+    return try {
+        val obj = JSONObject(json)
+        val out = mutableMapOf<String, com.localgpt.app.core.remote.ModelPricing>()
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val entry = obj.optJSONObject(k) ?: continue
+            val p = entry.optDouble("p", -1.0)
+            val c = entry.optDouble("c", -1.0)
+            if (k.isNotBlank() && p >= 0 && c >= 0 && (p > 0 || c > 0)) {
+                out[k] = com.localgpt.app.core.remote.ModelPricing(p, c)
+            }
+        }
+        out
+    } catch (_: Exception) {
+        emptyMap()
+    }
+}
+
+/** Serializes the per-model pricing map back to JSON. */
+fun remoteModelPricingToJson(map: Map<String, com.localgpt.app.core.remote.ModelPricing>): String {
+    return JSONObject().apply {
+        for ((k, v) in map) {
+            put(k, JSONObject().put("p", v.promptPerToken).put("c", v.completionPerToken))
+        }
+    }.toString()
+}
+
+/**
  * Effective context window for a remote model: per-model override wins,
  * otherwise the global remote default. Never confused with the on-device
  * [Settings.contextWindowTokens].
@@ -144,8 +200,16 @@ class SettingsRepository(
         val MODEL_SOURCE = stringPreferencesKey("model_source")
         val REMOTE_BASE_URL = stringPreferencesKey("remote_base_url")
         val REMOTE_MODEL_ID = stringPreferencesKey("remote_model_id")
+        val REMOTE_IMAGE_MODEL_ID = stringPreferencesKey("remote_image_model_id")
         val REMOTE_CONTEXT_WINDOW_TOKENS = intPreferencesKey("remote_context_window_tokens")
         val REMOTE_MODEL_CONTEXT_WINDOWS = stringPreferencesKey("remote_model_context_windows_json")
+        val REMOTE_MODEL_PRICING = stringPreferencesKey("remote_model_pricing_json")
+        val REMOTE_SPEND_MICROS = longPreferencesKey("remote_spend_micros")
+        val COMPARE_MODE = booleanPreferencesKey("compare_mode")
+        val COMPARE_SOURCE = stringPreferencesKey("compare_source")
+        val COMPARE_MODEL_ID = stringPreferencesKey("compare_model_id")
+        val MCP_ENABLED = booleanPreferencesKey("mcp_enabled")
+        val MCP_SERVERS_JSON = stringPreferencesKey("mcp_servers_json")
         val SERVER_PORT = intPreferencesKey("server_port")
         val SERVER_BIND_ALL = booleanPreferencesKey("server_bind_all")
         val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
@@ -374,8 +438,16 @@ class SettingsRepository(
                     remoteBaseUrl = prefs[Keys.REMOTE_BASE_URL] ?: "http://192.168.1.100:11434",
                     remoteApiKey = securePrefs().getString(SEC_REMOTE_API_KEY, "") ?: "",
                     remoteModelId = prefs[Keys.REMOTE_MODEL_ID] ?: "",
+                    remoteImageModelId = prefs[Keys.REMOTE_IMAGE_MODEL_ID] ?: "",
                     remoteContextWindowTokens = prefs[Keys.REMOTE_CONTEXT_WINDOW_TOKENS] ?: 8192,
                     remoteModelContextWindowsJson = prefs[Keys.REMOTE_MODEL_CONTEXT_WINDOWS] ?: "{}",
+                    remoteModelPricingJson = prefs[Keys.REMOTE_MODEL_PRICING] ?: "{}",
+                    remoteSpendMicros = prefs[Keys.REMOTE_SPEND_MICROS] ?: 0L,
+                    compareMode = prefs[Keys.COMPARE_MODE] ?: false,
+                    compareSource = prefs[Keys.COMPARE_SOURCE] ?: "",
+                    compareModelId = prefs[Keys.COMPARE_MODEL_ID] ?: "",
+                    mcpEnabled = prefs[Keys.MCP_ENABLED] ?: false,
+                    mcpServersJson = prefs[Keys.MCP_SERVERS_JSON] ?: "[]",
                     huggingFaceToken = securePrefs().getString(SEC_HF_TOKEN, "") ?: "",
                     serverPort = prefs[Keys.SERVER_PORT] ?: 8080,
                     serverBindAll = prefs[Keys.SERVER_BIND_ALL] ?: false,
@@ -451,6 +523,8 @@ class SettingsRepository(
 
     suspend fun setRemoteModelId(value: String) = edit { it[Keys.REMOTE_MODEL_ID] = value }
 
+    suspend fun setRemoteImageModelId(value: String) = edit { it[Keys.REMOTE_IMAGE_MODEL_ID] = value }
+
     suspend fun setRemoteContextWindowTokens(value: Int) =
         edit { it[Keys.REMOTE_CONTEXT_WINDOW_TOKENS] = value.coerceAtLeast(1024) }
 
@@ -463,6 +537,141 @@ class SettingsRepository(
             prefs[Keys.REMOTE_MODEL_CONTEXT_WINDOWS] = remoteModelContextWindowsToJson(map)
         }
     }
+
+    /** Replaces the cached per-model pricing map (model id → per-token USD). */
+    suspend fun setRemoteModelPricingJson(json: String) =
+        edit { it[Keys.REMOTE_MODEL_PRICING] = json.take(200_000) }
+
+    /** Adds to the cumulative estimated remote spend (USD micro-units). */
+    suspend fun addRemoteSpendMicros(deltaMicros: Long) {
+        if (deltaMicros <= 0) return
+        edit { prefs ->
+            val cur = prefs[Keys.REMOTE_SPEND_MICROS] ?: 0L
+            prefs[Keys.REMOTE_SPEND_MICROS] = (cur + deltaMicros).coerceAtMost(Long.MAX_VALUE / 2)
+        }
+    }
+
+    /** Resets the cumulative estimated remote spend to zero. */
+    suspend fun resetRemoteSpend() = edit { it[Keys.REMOTE_SPEND_MICROS] = 0L }
+
+    /** Master switch for compare mode (each prompt runs on two models). */
+    suspend fun setCompareMode(enabled: Boolean) = edit { it[Keys.COMPARE_MODE] = enabled }
+
+    /** Sets the challenger model for compare mode. */
+    suspend fun setCompareChallenger(source: String, modelId: String) =
+        edit {
+            it[Keys.COMPARE_SOURCE] = source
+            it[Keys.COMPARE_MODEL_ID] = modelId
+        }
+
+    /** Master switch for MCP tool use in chat. */
+    suspend fun setMcpEnabled(enabled: Boolean) = edit { it[Keys.MCP_ENABLED] = enabled }
+
+    /** Persists the MCP server list. Prefer the typed helpers below. */
+    suspend fun setMcpServersJson(json: String) = edit { it[Keys.MCP_SERVERS_JSON] = json }
+
+    /** Adds or replaces an MCP server config (matched by id).
+     *
+     * The bearer token is split out of the persisted JSON and kept in
+     * EncryptedSharedPreferences (same pattern as the remote API key):
+     * - [authToken] == null → leave any stored token untouched (edit dialog
+     *   left the field blank while a token was already saved),
+     * - blank → delete the stored token,
+     * - otherwise → store the new token.
+     */
+    suspend fun upsertMcpServer(
+        server: com.localgpt.app.mcp.McpServerConfig,
+        authToken: String? = null,
+    ) {
+        if (authToken != null) {
+            val key = mcpTokenKey(server.id)
+            if (authToken.isBlank()) {
+                try {
+                    securePrefs().edit().remove(key).apply()
+                } catch (t: Throwable) {
+                    KLog.e(TAG, "Failed to clear MCP token", t)
+                }
+            } else {
+                putSecureToken(key, authToken.trim())
+            }
+        }
+        val servers = currentMcpServers().toMutableList()
+        val stripped = server.copy(authToken = "", hasToken = false)
+        val idx = servers.indexOfFirst { it.id == stripped.id }
+        if (idx >= 0) servers[idx] = stripped else servers.add(stripped)
+        setMcpServersJson(com.localgpt.app.mcp.McpManager.serversToJson(servers))
+    }
+
+    /** Removes an MCP server config by id, including its stored token. */
+    suspend fun removeMcpServer(serverId: String) {
+        try {
+            securePrefs().edit().remove(mcpTokenKey(serverId)).apply()
+        } catch (t: Throwable) {
+            KLog.e(TAG, "Failed to clear MCP token", t)
+        }
+        tokenBump.update { it + 1 }
+        val servers = currentMcpServers().filter { it.id != serverId }
+        setMcpServersJson(com.localgpt.app.mcp.McpManager.serversToJson(servers))
+    }
+
+    /** Encrypted-storage key for one MCP server's bearer token. */
+    private fun mcpTokenKey(serverId: String) = "mcp_token_$serverId"
+
+    private val mcpTokenMigration = MigrationTracker()
+
+    /**
+     * One-time migration: tokens that were briefly persisted inside the
+     * plaintext MCP JSON move to EncryptedSharedPreferences and are stripped
+     * from the JSON (same "migrate then delete" pattern as other tokens).
+     */
+    private suspend fun migrateMcpTokensFromJson(): Boolean {
+        val prefs = context.dataStore.data.first()
+        val servers =
+            com.localgpt.app.mcp.McpManager.serversFromJson(
+                prefs[Keys.MCP_SERVERS_JSON] ?: "[]",
+            )
+        val withTokens = servers.filter { it.authToken.isNotBlank() }
+        if (withTokens.isEmpty()) return true
+        val editor = securePrefs().edit()
+        withTokens.forEach { editor.putString(mcpTokenKey(it.id), it.authToken) }
+        // Synchronous commit: the JSON source is stripped right after, so the
+        // copy must be durable first.
+        if (!editor.commit()) {
+            KLog.e(TAG, "MCP token migration commit failed; will retry next start")
+            return false
+        }
+        val stripped = servers.map { it.copy(authToken = "") }
+        edit { it[Keys.MCP_SERVERS_JSON] = com.localgpt.app.mcp.McpManager.serversToJson(stripped) }
+        KLog.d(TAG, "Migrated ${withTokens.size} MCP token(s) into encrypted storage")
+        return true
+    }
+
+    /**
+     * MCP server configs with bearer tokens re-hydrated from encrypted
+     * storage. This is the flow the chat layer consumes; the raw
+     * [Settings.mcpServersJson] never carries tokens.
+     */
+    val mcpServersFlow: Flow<List<com.localgpt.app.mcp.McpServerConfig>> =
+        combine(context.dataStore.data, tokenBump) { prefs, _ ->
+            mcpTokenMigration.runIfNeeded { migrateMcpTokensFromJson() }
+            val json = prefs[Keys.MCP_SERVERS_JSON] ?: "[]"
+            com.localgpt.app.mcp.McpManager.serversFromJson(json).map { server ->
+                val token =
+                    try {
+                        securePrefs().getString(mcpTokenKey(server.id), "").orEmpty()
+                    } catch (t: Throwable) {
+                        KLog.w(TAG, "Failed to read MCP token: ${t.message}")
+                        ""
+                    }
+                server.copy(authToken = token, hasToken = token.isNotBlank())
+            }
+        }.distinctUntilChanged()
+
+    /** Reads the currently persisted MCP server list (suspend helper for callers without a Flow). */
+    suspend fun currentMcpServers(): List<com.localgpt.app.mcp.McpServerConfig> =
+        com.localgpt.app.mcp.McpManager.serversFromJson(
+            context.dataStore.data.first()[Keys.MCP_SERVERS_JSON] ?: "[]",
+        )
 
     /** Removes the per-model override so the global remote default applies again. */
     suspend fun clearRemoteModelContextWindow(modelId: String) {

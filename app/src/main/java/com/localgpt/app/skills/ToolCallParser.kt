@@ -169,4 +169,77 @@ object ToolCallParser {
         runCatching {
             get(key)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString.orEmpty()
         }.getOrDefault("")
+
+    // ── Generic MCP tool-call parsing ────────────────────────────────
+
+    /**
+     * A tool call parsed from model output that is NOT a built-in web_search:
+     * candidate for MCP dispatch. [arguments] is the raw `arguments` object
+     * (empty when the model emitted none).
+     */
+    data class GenericToolCall(
+        val name: String,
+        val arguments: JsonObject,
+        val rawCallText: String,
+    )
+
+    private val MCP_NAME_PATTERN = Pattern.compile(
+        "\"name\"\\s*:\\s*\"([A-Za-z][A-Za-z0-9_.-]{0,127})\"",
+    )
+
+    /**
+     * Extracts a generic `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`
+     * (or markdown-fenced / bare-JSON equivalent) from the text. Returns null
+     * when the call targets a built-in `web_search*` tool — those keep flowing
+     * through [parse].
+     */
+    fun parseGenericCall(text: String): GenericToolCall? {
+        if (text.isBlank()) return null
+        val bodies = mutableListOf<Pair<String, String>>()
+
+        val xmlMatcher = Pattern.compile(
+            "<tool_call>([\\s\\S]*?)(?:<\\/tool_call>|$)",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(text)
+        if (xmlMatcher.find()) bodies.add(xmlMatcher.group(1).orEmpty().trim() to xmlMatcher.group(0).orEmpty())
+
+        val mdMatcher = Pattern.compile(
+            "```(?:tool_call|tool)(?:\\s+([\\s\\S]*?))?(?:```|$)",
+            Pattern.CASE_INSENSITIVE,
+        ).matcher(text)
+        if (mdMatcher.find()) bodies.add(mdMatcher.group(1).orEmpty().trim() to mdMatcher.group(0).orEmpty())
+
+        for ((body, raw) in bodies) {
+            parseGenericJson(body, raw)?.let { return it }
+        }
+
+        // Bare JSON object containing a "name" key.
+        val nameMatcher = MCP_NAME_PATTERN.matcher(text)
+        if (nameMatcher.find()) {
+            extractBalancedJson(text, nameMatcher.start())?.let { jsonStr ->
+                parseGenericJson(jsonStr, jsonStr)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun parseGenericJson(jsonStr: String, rawText: String): GenericToolCall? {
+        return try {
+            val obj = gson.fromJson(jsonStr, JsonObject::class.java) ?: return null
+            val name = obj.optString("name")
+            if (name.isBlank() || name.startsWith("web_search", ignoreCase = true)) return null
+            val args = obj.get("arguments")
+            val arguments = when {
+                args != null && args.isJsonObject -> args.asJsonObject
+                args != null && args.isJsonPrimitive && args.asJsonPrimitive.isString -> {
+                    // Lenient: some models emit arguments as a JSON-encoded string.
+                    runCatching { gson.fromJson(args.asString, JsonObject::class.java) }.getOrNull() ?: JsonObject()
+                }
+                else -> JsonObject()
+            }
+            GenericToolCall(name, arguments, rawText)
+        } catch (_: Exception) {
+            null
+        }
+    }
 }

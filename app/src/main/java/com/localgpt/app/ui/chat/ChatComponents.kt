@@ -479,17 +479,25 @@ internal fun MessageBubble(
                     }
                 }
 
-                // Attached Image if present
-                if (!message.imagePath.isNullOrBlank()) {
-                    val imagePath = message.imagePath
+                // Attachments: images (multi) + document chips.
+                // Falls back to legacy single imagePath for old conversations.
+                val attachmentImages =
+                    remember(message.attachments, message.imagePath) {
+                        val fromList = message.attachments.filter { it.type == "image" }.map { it.path }
+                        if (fromList.isNotEmpty()) fromList
+                        else listOfNotNull(message.imagePath?.takeIf { it.isNotBlank() })
+                    }
+                val attachmentFiles =
+                    remember(message.attachments) {
+                        message.attachments.filter { it.type == "file" }
+                    }
+                attachmentImages.forEach { imagePath ->
                     // B38: decode off the main thread, downsampled to bubble
                     // width (was: main-thread full-size decode in remember).
                     val bitmap by produceState<Bitmap?>(initialValue = null, imagePath) {
                         value =
                             withContext(Dispatchers.IO) {
-                                imagePath?.let { path ->
-                                    decodeSampledBitmapFromFile(File(path), reqSizePx = 1024)
-                                }
+                                decodeSampledBitmapFromFile(File(imagePath), reqSizePx = 1024)
                             }
                     }
                     // Recycle bitmap when imagePath changes or composable leaves composition
@@ -509,6 +517,48 @@ internal fun MessageBubble(
                                 .clip(RoundedCornerShape(12.dp)),
                             contentScale = ContentScale.FillWidth,
                         )
+                    }
+                }
+                if (attachmentFiles.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        attachmentFiles.take(3).forEach { file ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.Description,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        file.name.take(16),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
+                        }
+                        if (attachmentFiles.size > 3) {
+                            Text(
+                                "+${attachmentFiles.size - 3}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            )
+                        }
                     }
                 }
 

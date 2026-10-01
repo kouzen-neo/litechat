@@ -64,6 +64,28 @@
             </intent-filter>
         </activity>
 
+        <!-- Home screen widget "Tanya LiteChat": membuka chat dengan teks prefill -->
+        <receiver
+            android:name=".widget.LiteChatWidgetProvider"
+            android:exported="false"
+            android:label="Tanya LiteChat">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/litechat_widget_info" />
+        </receiver>
+
+        <!-- Layar konfigurasi widget (teks prefill per widget) -->
+        <activity
+            android:name=".widget.WidgetConfigActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+
     </application>
 
 </manifest>

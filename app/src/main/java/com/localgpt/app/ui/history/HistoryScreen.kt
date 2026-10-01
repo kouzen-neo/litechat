@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,10 +29,12 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -116,6 +119,12 @@ fun HistoryScreen(
     var renameTitle by remember { mutableStateOf("") }
     var deleteTarget by remember { mutableStateOf<ConversationHeader?>(null) }
     var showClearAllConfirm by remember { mutableStateOf(false) }
+    var folderTarget by remember { mutableStateOf<ConversationHeader?>(null) }
+    var folderInput by remember { mutableStateOf("") }
+    var folderFilter by remember { mutableStateOf<String?>(null) } // null = all
+    var tagTarget by remember { mutableStateOf<ConversationHeader?>(null) }
+    var tagInput by remember { mutableStateOf("") } // comma-separated
+    var tagFilter by remember { mutableStateOf<String?>(null) } // null = all
 
     var bodyMatchIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var bodySearchQuery by remember { mutableStateOf("") }
@@ -135,7 +144,7 @@ fun HistoryScreen(
     }
 
     val filteredList =
-        remember(conversations, query, sortMode, sortDescending, bodyMatchIds, bodySearchQuery) {
+        remember(conversations, query, sortMode, sortDescending, bodyMatchIds, bodySearchQuery, folderFilter, tagFilter) {
             var list =
                 if (query.isBlank()) {
                     conversations
@@ -145,6 +154,14 @@ fun HistoryScreen(
                             (query == bodySearchQuery && bodyMatchIds.contains(it.id))
                     }
                 }
+            val ff = folderFilter
+            if (ff != null) {
+                list = list.filter { it.folder == ff }
+            }
+            val tf = tagFilter
+            if (tf != null) {
+                list = list.filter { it.tags.contains(tf) }
+            }
             list =
                 when (sortMode) {
                     HistorySortMode.TIME -> if (sortDescending) list.sortedByDescending { it.updatedAt } else list.sortedBy { it.updatedAt }
@@ -339,6 +356,76 @@ fun HistoryScreen(
                         }
                     }
 
+                    // Folder filter chips
+                    val folders = remember(conversations) {
+                        conversations.mapNotNull { it.folder.takeIf { f -> f.isNotBlank() } }.distinct().sorted()
+                    }
+                    if (folders.isNotEmpty()) {
+                        item(key = "folder_filters") {
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                item(key = "folder_all") {
+                                    FilterChip(
+                                        selected = folderFilter == null,
+                                        onClick = { folderFilter = null },
+                                        label = { Text("All") },
+                                    )
+                                }
+                                items(folders, key = { "folder_$it" }) { folder ->
+                                    FilterChip(
+                                        selected = folderFilter == folder,
+                                        onClick = { folderFilter = if (folderFilter == folder) null else folder },
+                                        label = { Text(folder) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Folder,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp),
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Tag filter chips
+                    val allTags = remember(conversations) {
+                        conversations.flatMap { it.tags }.filter { it.isNotBlank() }.distinct().sorted()
+                    }
+                    if (allTags.isNotEmpty()) {
+                        item(key = "tag_filters") {
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                item(key = "tag_all") {
+                                    FilterChip(
+                                        selected = tagFilter == null,
+                                        onClick = { tagFilter = null },
+                                        label = { Text("All tags") },
+                                    )
+                                }
+                                items(allTags, key = { "tag_$it" }) { tag ->
+                                    FilterChip(
+                                        selected = tagFilter == tag,
+                                        onClick = { tagFilter = if (tagFilter == tag) null else tag },
+                                        label = { Text(tag) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Tag,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp),
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     if (filteredList.isEmpty()) {
                         item(key = "empty_state") {
                             Card(
@@ -431,13 +518,70 @@ fun HistoryScreen(
 
                             // Middle Info
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = conv.title.ifBlank { "Untitled Chat" },
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = conv.title.ifBlank { "Untitled Chat" },
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                    if (conv.hasPinnedModel) {
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            "📌",
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
+                                }
+                                if (conv.folder.isNotBlank()) {
+                                    Spacer(Modifier.height(2.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.secondaryContainer,
+                                    ) {
+                                        Text(
+                                            conv.folder,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
+                                if (conv.tags.isNotEmpty()) {
+                                    Spacer(Modifier.height(2.dp))
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        conv.tags.take(3).forEach { tag ->
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = MaterialTheme.colorScheme.tertiaryContainer,
+                                            ) {
+                                                Text(
+                                                    "#$tag",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontSize = 10.sp,
+                                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                                    maxLines = 1,
+                                                )
+                                            }
+                                        }
+                                        if (conv.tags.size > 3) {
+                                            Text(
+                                                "+${conv.tags.size - 3}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }
                                 Spacer(Modifier.height(2.dp))
                                 Text(
                                     text = preview,
@@ -457,6 +601,36 @@ fun HistoryScreen(
 
                             // Actions
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = {
+                                        folderTarget = conv
+                                        folderInput = conv.folder
+                                    },
+                                    modifier = Modifier.size(32.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.Folder,
+                                        contentDescription = "Move to folder",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        tagTarget = conv
+                                        tagInput = conv.tags.joinToString(", ")
+                                    },
+                                    modifier = Modifier.size(32.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.Tag,
+                                        contentDescription = "Edit tags",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+
                                 IconButton(
                                     onClick = {
                                         scope.launch {
@@ -628,6 +802,117 @@ fun HistoryScreen(
 }
 
     // ── Dialogs ──
+    if (folderTarget != null) {
+        val existingFolders = remember(conversations) {
+            conversations.mapNotNull { it.folder.takeIf { f -> f.isNotBlank() } }.distinct().sorted()
+        }
+        AlertDialog(
+            onDismissRequest = { folderTarget = null },
+            icon = { Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("Move to Folder") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = folderInput,
+                        onValueChange = { folderInput = it },
+                        label = { Text("Folder name (empty = no folder)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (existingFolders.isNotEmpty()) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(existingFolders, key = { "pick_$it" }) { folder ->
+                                FilterChip(
+                                    selected = folderInput == folder,
+                                    onClick = { folderInput = folder },
+                                    label = { Text(folder, style = MaterialTheme.typography.labelSmall) },
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        folderTarget?.let { viewModel.setConversationFolder(it.id, folderInput) }
+                        folderTarget = null
+                    },
+                ) {
+                    Text("Move")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { folderTarget = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (tagTarget != null) {
+        val existingTags = remember(conversations) {
+            conversations.flatMap { it.tags }.filter { it.isNotBlank() }.distinct().sorted()
+        }
+        val currentTags = remember(tagInput) {
+            tagInput.split(",").map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        }
+        AlertDialog(
+            onDismissRequest = { tagTarget = null },
+            icon = { Icon(Icons.Default.Tag, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("Edit Tags") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = tagInput,
+                        onValueChange = { tagInput = it },
+                        label = { Text("Tags, comma-separated") },
+                        placeholder = { Text("work, idea, todo") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (existingTags.isNotEmpty()) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(existingTags, key = { "tagpick_$it" }) { tag ->
+                                val selected = currentTags.contains(tag)
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = {
+                                        tagInput =
+                                            if (selected) {
+                                                currentTags.filter { it != tag }.joinToString(", ")
+                                            } else {
+                                                (currentTags + tag).joinToString(", ")
+                                            }
+                                    },
+                                    label = { Text(tag, style = MaterialTheme.typography.labelSmall) },
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        "A chat can carry several tags — unlike folders, which hold one.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        tagTarget?.let { viewModel.setConversationTags(it.id, currentTags) }
+                        tagTarget = null
+                    },
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { tagTarget = null }) { Text("Cancel") }
+            },
+        )
+    }
+
     if (renameTarget != null) {
         AlertDialog(
             onDismissRequest = { renameTarget = null },
