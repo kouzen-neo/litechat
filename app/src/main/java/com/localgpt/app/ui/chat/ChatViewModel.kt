@@ -846,9 +846,11 @@ class ChatViewModel(
 
     private fun refreshPinState() {
         val conv = conversation
+        val src = conv?.pinnedModelSource
+        val id = conv?.pinnedModelId
         modelPinState.value =
-            if (conv?.pinnedModelSource != null && !conv.pinnedModelId.isNullOrBlank()) {
-                conv.pinnedModelSource to conv.pinnedModelId!!
+            if (!src.isNullOrBlank() && !id.isNullOrBlank()) {
+                src to id
             } else {
                 null
             }

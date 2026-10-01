@@ -255,6 +255,13 @@ fun HistoryScreen(
             }
 
             // ── 2. Content Views ──
+            // Hoisted: remember() is illegal inside LazyListScope.
+            val folderNames = remember(conversations) {
+                conversations.mapNotNull { it.folder.takeIf { f -> f.isNotBlank() } }.distinct().sorted()
+            }
+            val allTagNames = remember(conversations) {
+                conversations.flatMap { it.tags }.filter { it.isNotBlank() }.distinct().sorted()
+            }
             if (selectedTab == 0) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -357,10 +364,7 @@ fun HistoryScreen(
                     }
 
                     // Folder filter chips
-                    val folders = remember(conversations) {
-                        conversations.mapNotNull { it.folder.takeIf { f -> f.isNotBlank() } }.distinct().sorted()
-                    }
-                    if (folders.isNotEmpty()) {
+                    if (folderNames.isNotEmpty()) {
                         item(key = "folder_filters") {
                             LazyRow(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -373,7 +377,7 @@ fun HistoryScreen(
                                         label = { Text("All") },
                                     )
                                 }
-                                items(folders, key = { "folder_$it" }) { folder ->
+                                items(folderNames, key = { "folder_$it" }) { folder ->
                                     FilterChip(
                                         selected = folderFilter == folder,
                                         onClick = { folderFilter = if (folderFilter == folder) null else folder },
@@ -392,10 +396,7 @@ fun HistoryScreen(
                     }
 
                     // Tag filter chips
-                    val allTags = remember(conversations) {
-                        conversations.flatMap { it.tags }.filter { it.isNotBlank() }.distinct().sorted()
-                    }
-                    if (allTags.isNotEmpty()) {
+                    if (allTagNames.isNotEmpty()) {
                         item(key = "tag_filters") {
                             LazyRow(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -408,7 +409,7 @@ fun HistoryScreen(
                                         label = { Text("All tags") },
                                     )
                                 }
-                                items(allTags, key = { "tag_$it" }) { tag ->
+                                items(allTagNames, key = { "tag_$it" }) { tag ->
                                     FilterChip(
                                         selected = tagFilter == tag,
                                         onClick = { tagFilter = if (tagFilter == tag) null else tag },
