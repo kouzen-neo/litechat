@@ -22,7 +22,6 @@ import io.ktor.server.routing.options
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import io.ktor.utils.io.cancel
-import io.ktor.utils.io.isClosedForRead
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -233,7 +232,9 @@ object OpenAiServer {
         val out = ByteArrayOutputStream()
         val buf = ByteArray(8192)
         var total = 0
-        while (!channel.isClosedForRead) {
+        // readAvailable() returns -1 at end-of-stream, so no isClosedForRead
+        // check is needed (that API was removed in Ktor 3.x).
+        while (true) {
             val n = channel.readAvailable(buf)
             if (n == -1) break
             total += n

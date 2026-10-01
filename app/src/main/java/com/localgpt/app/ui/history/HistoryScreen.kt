@@ -592,7 +592,7 @@ fun HistoryScreen(
                             )
                         }
 
-                        val totalMsgs = conversations.sumOf { it.messages.size }
+                        val totalMsgs = conversations.sumOf { it.messageCount }
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = MaterialTheme.colorScheme.surfaceContainerHigh,

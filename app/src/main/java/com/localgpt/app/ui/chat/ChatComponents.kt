@@ -496,9 +496,12 @@ internal fun MessageBubble(
                     DisposableEffect(bitmap) {
                         onDispose { bitmap?.recycle() }
                     }
-                    if (bitmap != null) {
+                    // Copy to a local val first: smart cast doesn't work on
+                    // delegated properties.
+                    val currentBitmap = bitmap
+                    if (currentBitmap != null) {
                         Image(
-                            bitmap = bitmap.asImageBitmap(),
+                            bitmap = currentBitmap.asImageBitmap(),
                             contentDescription = "Attached Image",
                             modifier = Modifier
                                 .fillMaxWidth()

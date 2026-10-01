@@ -637,7 +637,10 @@ fun ChatScreen(
                             DisposableEffect(bitmap) {
                                 onDispose { bitmap?.recycle() }
                             }
-                            if (bitmap != null) {
+                            // Copy to a local val first: smart cast doesn't work on
+                            // delegated properties.
+                            val previewBitmap = bitmap
+                            if (previewBitmap != null) {
                                 Row(
                                     modifier = Modifier
                                         .padding(start = 10.dp, top = 6.dp, end = 10.dp)
@@ -646,7 +649,7 @@ fun ChatScreen(
                                 ) {
                                     Box(modifier = Modifier.size(44.dp)) {
                                         Image(
-                                            bitmap = bitmap.asImageBitmap(),
+                                            bitmap = previewBitmap.asImageBitmap(),
                                             contentDescription = "Selected image preview",
                                             modifier = Modifier
                                                 .fillMaxSize()
