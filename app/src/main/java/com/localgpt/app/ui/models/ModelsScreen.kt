@@ -2,7 +2,10 @@ package com.localgpt.app.ui.models
 
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.ui.text.style.TextAlign
 import com.localgpt.app.data.ChatConstants
+import com.localgpt.app.data.effectiveRemoteContextWindow
+import com.localgpt.app.data.parseRemoteModelContextWindows
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -89,6 +92,7 @@ fun ModelsScreen(
 
     val remoteModels by viewModel.remoteModels
     val isFetchingRemoteModels by viewModel.isFetchingRemoteModels
+    val isDetectingContextWindow by viewModel.isDetectingContextWindow
 
     val freeDiskBytes by viewModel.freeDiskSpaceBytes
     val freeDiskGb = freeDiskBytes / (1024.0 * 1024.0 * 1024.0)
@@ -760,6 +764,91 @@ fun ModelsScreen(
                                     }
                                 }
                             }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+                            // ── Remote Context Window ──
+                            // Independent from the on-device context window: switching
+                            // back to a local model restores the local value untouched.
+                            val remoteWindow = settings.effectiveRemoteContextWindow(settings.remoteModelId)
+                            val perModelOverride =
+                                parseRemoteModelContextWindows(settings.remoteModelContextWindowsJson)[settings.remoteModelId]
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "Remote Context Window",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                    Text(
+                                        if (settings.remoteModelId.isBlank()) {
+                                            "Default for remote models: $remoteWindow tokens"
+                                        } else if (perModelOverride != null) {
+                                            "${settings.remoteModelId}: $perModelOverride tokens (auto-detected)"
+                                        } else {
+                                            "${settings.remoteModelId}: $remoteWindow tokens (default)"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (perModelOverride != null && settings.remoteModelId.isNotBlank()) {
+                                    TextButton(onClick = { viewModel.clearRemoteModelContextWindow(settings.remoteModelId) }) {
+                                        Text("Reset", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                listOf(
+                                    Pair(4096, "4K"),
+                                    Pair(8192, "8K"),
+                                    Pair(32768, "32K"),
+                                    Pair(131072, "128K"),
+                                ).forEach { (tokens, label) ->
+                                    val isSelected = settings.remoteContextWindowTokens == tokens && perModelOverride == null
+                                    Surface(
+                                        onClick = { viewModel.setRemoteContextWindowTokens(tokens) },
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.padding(vertical = 10.dp),
+                                            textAlign = TextAlign.Center,
+                                        )
+                                    }
+                                }
+                            }
+                            Button(
+                                onClick = { viewModel.detectRemoteContextWindow() },
+                                enabled = !isDetectingContextWindow && settings.remoteModelId.isNotBlank(),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                if (isDetectingContextWindow) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                }
+                                Spacer(Modifier.width(6.dp))
+                                Text(if (isDetectingContextWindow) "Detecting…" else "Auto-detect from Provider")
+                            }
+                            Text(
+                                "Ollama and OpenRouter models report their context length automatically " +
+                                    "when selected; otherwise set it manually to avoid cut-off replies.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }

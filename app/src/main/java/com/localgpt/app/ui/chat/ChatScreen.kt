@@ -5,6 +5,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import com.localgpt.app.data.ChatConstants
+import com.localgpt.app.data.effectiveRemoteContextWindow
+import com.localgpt.app.core.remote.RemoteAiClient
 import android.app.Activity
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -65,6 +67,7 @@ import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
@@ -496,7 +499,14 @@ fun ChatScreen(
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
                         )
-                        val maxTokens = settings.contextWindowTokens
+                        val maxTokens =
+                            if (settings.modelSource == ChatConstants.SOURCE_REMOTE) {
+                                // Remote window follows the selected remote model,
+                                // not the on-device setting.
+                                settings.effectiveRemoteContextWindow(settings.remoteModelId)
+                            } else {
+                                settings.contextWindowTokens
+                            }
                         val ratio = if (maxTokens > 0) (totalContextTokens.toFloat() / maxTokens.toFloat()) * 100 else 0f
                         Text(
                             text = "Context: $totalContextTokens / $maxTokens tok (${ratio.toInt()}%)",
@@ -680,6 +690,38 @@ fun ChatScreen(
                                         fontWeight = FontWeight.SemiBold,
                                     )
                                 }
+                            }
+                        }
+
+                        // Warn when an image is attached in remote mode but the
+                        // selected remote model doesn't look vision-capable.
+                        if (selectedImageUri != null &&
+                            settings.modelSource == ChatConstants.SOURCE_REMOTE &&
+                            !RemoteAiClient.isLikelyVisionModel(settings.remoteModelId)
+                        ) {
+                            Row(
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.tertiaryContainer)
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "This remote model may not be able to read images. " +
+                                        "Use a vision model (e.g. qwen2-vl, llava) to analyze pictures.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                )
                             }
                         }
 

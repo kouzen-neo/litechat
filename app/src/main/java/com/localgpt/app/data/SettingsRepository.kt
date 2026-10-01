@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
+import org.json.JSONObject
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
@@ -52,6 +53,15 @@ data class Settings(
     val remoteBaseUrl: String = "http://192.168.1.100:11434",
     val remoteApiKey: String = "",
     val remoteModelId: String = "",
+    /**
+     * Remote context window. Independent from the on-device
+     * [contextWindowTokens] so switching back to local restores the local
+     * value untouched. Per-model overrides live in
+     * [remoteModelContextWindowsJson].
+     */
+    val remoteContextWindowTokens: Int = 8192,
+    /** JSON object: remote model id → context window tokens override. */
+    val remoteModelContextWindowsJson: String = "{}",
     // Model downloads
     val huggingFaceToken: String = "",
     // Embedded OpenAI-compatible server
@@ -76,6 +86,43 @@ data class Settings(
     val enableWebSearch: Boolean = true,
 )
 
+/**
+ * Parses the per-remote-model context window overrides JSON
+ * (`{ "<modelId>": <tokens>, ... }`). Malformed entries are ignored.
+ */
+fun parseRemoteModelContextWindows(json: String): Map<String, Int> {
+    return try {
+        val obj = JSONObject(json)
+        val out = mutableMapOf<String, Int>()
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val v = obj.optInt(k, -1)
+            if (k.isNotBlank() && v > 0) out[k] = v
+        }
+        out
+    } catch (_: Exception) {
+        emptyMap()
+    }
+}
+
+/** Serializes per-remote-model context window overrides back to JSON. */
+fun remoteModelContextWindowsToJson(map: Map<String, Int>): String {
+    return JSONObject().apply {
+        for ((k, v) in map) put(k, v)
+    }.toString()
+}
+
+/**
+ * Effective context window for a remote model: per-model override wins,
+ * otherwise the global remote default. Never confused with the on-device
+ * [Settings.contextWindowTokens].
+ */
+fun Settings.effectiveRemoteContextWindow(modelId: String): Int {
+    val override = parseRemoteModelContextWindows(remoteModelContextWindowsJson)[modelId]
+    return (override ?: remoteContextWindowTokens).coerceAtLeast(1024)
+}
+
 class SettingsRepository(
     private val context: Context,
 ) {
@@ -97,6 +144,8 @@ class SettingsRepository(
         val MODEL_SOURCE = stringPreferencesKey("model_source")
         val REMOTE_BASE_URL = stringPreferencesKey("remote_base_url")
         val REMOTE_MODEL_ID = stringPreferencesKey("remote_model_id")
+        val REMOTE_CONTEXT_WINDOW_TOKENS = intPreferencesKey("remote_context_window_tokens")
+        val REMOTE_MODEL_CONTEXT_WINDOWS = stringPreferencesKey("remote_model_context_windows_json")
         val SERVER_PORT = intPreferencesKey("server_port")
         val SERVER_BIND_ALL = booleanPreferencesKey("server_bind_all")
         val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
@@ -325,6 +374,8 @@ class SettingsRepository(
                     remoteBaseUrl = prefs[Keys.REMOTE_BASE_URL] ?: "http://192.168.1.100:11434",
                     remoteApiKey = securePrefs().getString(SEC_REMOTE_API_KEY, "") ?: "",
                     remoteModelId = prefs[Keys.REMOTE_MODEL_ID] ?: "",
+                    remoteContextWindowTokens = prefs[Keys.REMOTE_CONTEXT_WINDOW_TOKENS] ?: 8192,
+                    remoteModelContextWindowsJson = prefs[Keys.REMOTE_MODEL_CONTEXT_WINDOWS] ?: "{}",
                     huggingFaceToken = securePrefs().getString(SEC_HF_TOKEN, "") ?: "",
                     serverPort = prefs[Keys.SERVER_PORT] ?: 8080,
                     serverBindAll = prefs[Keys.SERVER_BIND_ALL] ?: false,
@@ -399,6 +450,29 @@ class SettingsRepository(
     suspend fun setRemoteApiKey(value: String) = putSecureToken(SEC_REMOTE_API_KEY, value)
 
     suspend fun setRemoteModelId(value: String) = edit { it[Keys.REMOTE_MODEL_ID] = value }
+
+    suspend fun setRemoteContextWindowTokens(value: Int) =
+        edit { it[Keys.REMOTE_CONTEXT_WINDOW_TOKENS] = value.coerceAtLeast(1024) }
+
+    /** Stores/updates the per-model context window override for a remote model. */
+    suspend fun setRemoteModelContextWindow(modelId: String, tokens: Int) {
+        if (modelId.isBlank()) return
+        edit { prefs ->
+            val map = parseRemoteModelContextWindows(prefs[Keys.REMOTE_MODEL_CONTEXT_WINDOWS] ?: "{}").toMutableMap()
+            map[modelId] = tokens.coerceAtLeast(1024)
+            prefs[Keys.REMOTE_MODEL_CONTEXT_WINDOWS] = remoteModelContextWindowsToJson(map)
+        }
+    }
+
+    /** Removes the per-model override so the global remote default applies again. */
+    suspend fun clearRemoteModelContextWindow(modelId: String) {
+        if (modelId.isBlank()) return
+        edit { prefs ->
+            val map = parseRemoteModelContextWindows(prefs[Keys.REMOTE_MODEL_CONTEXT_WINDOWS] ?: "{}").toMutableMap()
+            map.remove(modelId)
+            prefs[Keys.REMOTE_MODEL_CONTEXT_WINDOWS] = remoteModelContextWindowsToJson(map)
+        }
+    }
 
     suspend fun setHuggingFaceToken(value: String) = putSecureToken(SEC_HF_TOKEN, value)
 

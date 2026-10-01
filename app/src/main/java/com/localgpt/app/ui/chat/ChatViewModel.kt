@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
 import com.localgpt.app.data.ChatConstants
 import java.io.File
 import androidx.compose.runtime.mutableStateListOf
@@ -14,7 +15,9 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.localgpt.app.core.engine.LiteRtEngineManager
 import com.localgpt.app.core.remote.RemoteAiClient
+import com.localgpt.app.core.remote.RemoteChatMessage
 import com.localgpt.app.core.remote.RemoteModelItem
+import com.localgpt.app.core.remote.capMessagesToWindow
 import com.localgpt.app.core.server.ChatServerService
 import com.localgpt.app.core.server.OpenAiServer
 import com.localgpt.app.core.server.PromptBuilder
@@ -25,6 +28,8 @@ import com.localgpt.app.data.ConversationHeader
 import com.localgpt.app.data.DEFAULT_SYSTEM_PROMPT
 import com.localgpt.app.data.Settings
 import com.localgpt.app.data.SettingsRepository
+import com.localgpt.app.data.effectiveRemoteContextWindow
+import com.localgpt.app.data.parseRemoteModelContextWindows
 import com.localgpt.app.artifacts.ArtifactStore
 import com.localgpt.app.localai.LocalAiCatalog
 import com.localgpt.app.localai.LocalModelDownloader
@@ -123,6 +128,8 @@ class ChatViewModel(
     private companion object {
         const val COMPRESS_KEEP_RECENT = 6
         const val COMPRESS_THRESHOLD = 0.75f
+        /** Rough token cost of one attached image for remote requests. */
+        const val REMOTE_IMAGE_TOKEN_ESTIMATE = 1500
         const val CODE_OUTPUT_RULES =
             "\n\n[RESPONSE GUIDELINES]\n" +
             "1. Provide a clear, helpful explanation or summary for the user.\n" +
@@ -180,6 +187,7 @@ class ChatViewModel(
     // Remote Provider state
     val remoteModels = mutableStateOf<List<RemoteModelItem>>(emptyList())
     val isFetchingRemoteModels = mutableStateOf(false)
+    val isDetectingContextWindow = mutableStateOf(false)
 
     fun setSelectedImage(uri: Uri?) {
         selectedImageUri.value = uri
@@ -468,10 +476,17 @@ class ChatViewModel(
      * Ensures the working context fits the window. When usage crosses the
      * trigger ratio, evicted turns are archived into Chat Memory (RAG) and a
      * rolling summary is (re)generated. Never mutates the visible history.
+     *
+     * @param modelPath on-device model for summary generation; null in remote
+     * mode (no local summarizer) — then only the existing summary is reused
+     * and the caller hard-caps the request history instead.
+     * @param windowTokens effective context window; defaults to the on-device
+     * setting, pass the remote window in remote mode.
      */
     private suspend fun ensureContextFit(
         s: Settings,
-        modelPath: String,
+        modelPath: String?,
+        windowTokens: Int = s.contextWindowTokens,
     ): String? {
         val conv = conversation ?: return null
         if (!s.autoCompress) return conv.summary
@@ -485,13 +500,17 @@ class ChatViewModel(
             unfolded.sumOf { estimateTokens(it.content) } +
                 (summary?.let { estimateTokens(it) } ?: 0)
         val headroom = s.maxTokens + 256
-        val triggerTok = (s.contextWindowTokens * COMPRESS_THRESHOLD).toInt() - headroom
+        val triggerTok = (windowTokens * COMPRESS_THRESHOLD).toInt() - headroom
         if (effTok < triggerTok) return summary
 
         // Fold everything older than the recent tail into the summary.
         val foldable =
             if (unfolded.size > COMPRESS_KEEP_RECENT) unfolded.dropLast(COMPRESS_KEEP_RECENT) else emptyList()
         if (foldable.isEmpty()) return summary
+
+        // Remote mode without a local model: cannot run the summarizer, so
+        // leave the summary untouched — the caller trims the request instead.
+        if (modelPath == null) return summary
 
         isCompressing.value = true
         try {
@@ -529,7 +548,7 @@ class ChatViewModel(
                     topK = 40,
                     topP = 0.90f,
                     maxTokens = 256,
-                    contextWindow = maxOf(1024, s.contextWindowTokens),
+                    contextWindow = maxOf(1024, windowTokens),
                     backend = s.backend,
                     systemPrompt = "",
                     enableThinking = false,
@@ -1007,7 +1026,7 @@ class ChatViewModel(
             val promptText = if (body.isNotBlank()) body else "Describe this image."
 
             if (s.modelSource == ChatConstants.SOURCE_REMOTE) {
-                sendRemoteMessage(promptText, s)
+                sendRemoteMessage(promptText, s, savedImageFile?.absolutePath)
                 return@launch
             }
 
@@ -1115,7 +1134,25 @@ class ChatViewModel(
         }
     }
 
-    private fun sendRemoteMessage(body: String, s: Settings) {
+    /**
+     * Encodes a persisted attachment image as an OpenAI-style
+     * `data:image/jpeg;base64,...` URL for remote vision models.
+     * The persisted file is already a downscaled JPEG (≤1024px, q85).
+     */
+    private suspend fun encodeImageDataUrl(imagePath: String?): String? =
+        withContext(Dispatchers.IO) {
+            if (imagePath.isNullOrBlank()) return@withContext null
+            try {
+                val file = File(imagePath)
+                if (!file.exists() || file.length() == 0L || file.length() > 8_000_000L) return@withContext null
+                "data:image/jpeg;base64," + Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+            } catch (t: Throwable) {
+                KLog.w("ChatVM", "Failed to encode image for remote: ${t.message}")
+                null
+            }
+        }
+
+    private fun sendRemoteMessage(body: String, s: Settings, imagePath: String? = null) {
         if (s.remoteBaseUrl.isBlank() || s.remoteModelId.isBlank()) {
             errorMessage.value = "Please configure Remote Base URL and select a model in Models tab."
             // B1: sendMessage() already set isGenerating=true before calling us;
@@ -1138,6 +1175,7 @@ class ChatViewModel(
                 ChatMessageEntry(
                     role = ChatConstants.ROLE_USER,
                     content = body,
+                    imagePath = imagePath,
                     parentId = messages.lastOrNull()?.id,
                 ).also {
                     messages.add(it)
@@ -1145,6 +1183,8 @@ class ChatViewModel(
                 }
             }
         val branchQuery = userEntry.content
+        // Regenerate reuses the stored attachment of the existing message.
+        val effectiveImagePath = imagePath ?: userEntry.imagePath
 
         val assistant = ChatMessageEntry(role = ChatConstants.ROLE_ASSISTANT, content = "", parentId = userEntry.id)
         messages.add(assistant)
@@ -1166,20 +1206,39 @@ class ChatViewModel(
                     }
                     val (ragSystem, sources) = withRagSystem(systemContent, branchQuery)
                     ragSources = sources
-                    // Remote providers manage their own windows; reuse a stored summary when present.
-                    val storedSummary = conversation?.summary
-                    val appliedWindowRemote = !storedSummary.isNullOrBlank()
+                    // Remote context window: per-model override wins, otherwise
+                    // the global remote default. The on-device setting is left
+                    // untouched so switching back to local restores it as-is.
+                    val remoteWindow = s.effectiveRemoteContextWindow(s.remoteModelId)
+                    val localModelPath = ChatServerService.resolveModelPath(app, s)
+                    val activeSummary =
+                        runCatching { ensureContextFit(s, localModelPath, remoteWindow) }.getOrNull()
+                    val appliedWindowRemote = !activeSummary.isNullOrBlank()
                     val finalSystem =
-                        injectSummary(ragSystem, storedSummary, appliedWindowRemote)
+                        injectSummary(ragSystem, activeSummary, appliedWindowRemote)
 
-                    val historyMap = mutableListOf<Map<String, String>>()
+                    val imageDataUrl = encodeImageDataUrl(effectiveImagePath)
+                    val history = mutableListOf<RemoteChatMessage>()
                     if (finalSystem.isNotBlank()) {
-                        historyMap.add(mapOf("role" to "system", "content" to finalSystem))
+                        history.add(RemoteChatMessage(role = "system", text = finalSystem))
                     }
                     val windowed = promptWindowMessages()
                     windowed.dropLast(1).forEach {
-                        historyMap.add(mapOf("role" to it.role, "content" to it.content))
+                        history.add(RemoteChatMessage(role = it.role, text = it.content))
                     }
+                    // Attach the image to the latest user message (last entry).
+                    if (imageDataUrl != null && history.isNotEmpty()) {
+                        val last = history.last()
+                        history[history.lastIndex] = last.copy(imageDataUrls = listOf(imageDataUrl))
+                    }
+                    // Hard-cap to the remote window so long conversations are
+                    // trimmed client-side instead of failing with a 400 from
+                    // the server.
+                    val tokenCounts =
+                        history.map { msg ->
+                            estimateTokens(msg.text) + msg.imageDataUrls.size * REMOTE_IMAGE_TOKEN_ESTIMATE
+                        }
+                    val capped = capMessagesToWindow(history, tokenCounts, remoteWindow, s.maxTokens + 256)
 
                     collectStreamIntoMessage(
                         deltas =
@@ -1187,7 +1246,7 @@ class ChatViewModel(
                                 baseUrl = s.remoteBaseUrl,
                                 apiKey = s.remoteApiKey,
                                 model = s.remoteModelId,
-                                messages = historyMap,
+                                messages = capped,
                                 temperature = s.temperature,
                                 topP = s.topP,
                                 maxTokens = s.maxTokens,
@@ -1543,7 +1602,53 @@ class ChatViewModel(
 
     fun setRemoteApiKey(key: String) = launchSetting { settingsRepo.setRemoteApiKey(key) }
 
-    fun setRemoteModelId(id: String) = launchSetting { settingsRepo.setRemoteModelId(id) }
+    fun setRemoteModelId(id: String) =
+        launchSetting {
+            settingsRepo.setRemoteModelId(id)
+            // Auto-detect the context window for a newly selected model, once:
+            // skip when a per-model override was already stored.
+            if (id.isNotBlank() &&
+                parseRemoteModelContextWindows(settings.value.remoteModelContextWindowsJson)[id] == null
+            ) {
+                detectRemoteContextWindow(id)
+            }
+        }
+
+    fun setRemoteContextWindowTokens(tokens: Int) =
+        launchSetting { settingsRepo.setRemoteContextWindowTokens(tokens) }
+
+    fun clearRemoteModelContextWindow(modelId: String) =
+        launchSetting { settingsRepo.clearRemoteModelContextWindow(modelId) }
+
+    /**
+     * Best-effort detection of the selected remote model's context window
+     * (Ollama `/api/show`, OpenRouter `context_length`). On success the value
+     * is stored as a per-model override; the global remote default and the
+     * on-device setting are untouched.
+     */
+    fun detectRemoteContextWindow(modelId: String = settings.value.remoteModelId) {
+        val s = settings.value
+        if (s.remoteBaseUrl.isBlank() || modelId.isBlank()) {
+            errorMessage.value = "Set the Remote Base URL and select a model first."
+            return
+        }
+        if (isDetectingContextWindow.value) return
+        isDetectingContextWindow.value = true
+        viewModelScope.launch {
+            try {
+                val detected =
+                    RemoteAiClient.detectContextWindow(s.remoteBaseUrl, s.remoteApiKey, modelId)
+                if (detected != null) {
+                    settingsRepo.setRemoteModelContextWindow(modelId, detected)
+                } else {
+                    errorMessage.value =
+                        "Could not detect the context window for this provider — set it manually below."
+                }
+            } finally {
+                isDetectingContextWindow.value = false
+            }
+        }
+    }
 
     fun fetchRemoteModels(baseUrl: String, apiKey: String = "") {
         isFetchingRemoteModels.value = true
