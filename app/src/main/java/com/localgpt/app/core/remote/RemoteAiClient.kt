@@ -227,6 +227,8 @@ object RemoteAiClient {
             return resp.body?.string()
         }
     }
+
+    suspend fun fetchModels(baseUrl: String, apiKey: String = ""): Result<List<RemoteModelItem>> =
         withContext(Dispatchers.IO) {
             try {
                 val cleanUrl = baseUrl.trimEnd('/')
