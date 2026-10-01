@@ -12,7 +12,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import androidx.security.crypto.MasterKeys
 import com.localgpt.app.util.KLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -136,14 +136,13 @@ class SettingsRepository(
     private val securePrefs: SharedPreferences by lazy {
         val appContext = context.applicationContext
         try {
-            val masterKey =
-                MasterKey.Builder(appContext)
-                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                    .build()
+            // MasterKeys (plural) is the stable API in security-crypto 1.0.0;
+            // the singular MasterKey builder only exists in 1.1.0-alpha+.
+            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
             EncryptedSharedPreferences.create(
                 appContext,
                 SECURE_PREFS_NAME,
-                masterKey,
+                masterKeyAlias,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )

@@ -20,7 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.TextLinkStyles
+import androidx.compose.foundation.text.withLink
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
@@ -727,15 +727,13 @@ private fun annotate(
                 raw.startsWith("[") && raw.contains("](") -> {
                     val linkText = raw.substringAfter("[").substringBefore("]")
                     val url = raw.substringAfter("](").substringBeforeLast(")")
-                    val linkTextStyles =
-                        TextLinkStyles(
-                            style = linkStyle,
-                            focusedStyle = linkStyle,
-                            hoveredStyle = linkStyle,
-                            pressedStyle = linkStyle,
-                        )
-                    withLink(LinkAnnotation.Url(url, linkTextStyles)) {
-                        append(linkText)
+                    // Style the link text manually instead of TextLinkStyles:
+                    // the styles class moved between Compose versions, while
+                    // withStyle + LinkAnnotation.Url is stable everywhere.
+                    withLink(LinkAnnotation.Url(url)) {
+                        withStyle(style = linkStyle) {
+                            append(linkText)
+                        }
                     }
                 }
                 else -> append(raw)

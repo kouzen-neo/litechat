@@ -5,9 +5,10 @@ plugins {
 
 android {
     namespace = "com.localgpt.app"
-    // TODO: bump back to 37 once Google publishes the android-37 SDK platform
-    // (public repo only has up to android-36 as of 2026-10-01).
-    compileSdk = 36
+    // Dependencies (compose material3 1.5.0-alpha25, material-kolor 5.0.0, ...)
+    // require compileSdk 37+, so keep it at 37 even though only android-36
+    // ships in some SDK snapshots.
+    compileSdk = 37
 
     // -PabiFilter=arm64-v8a -> single-ABI APK; without flag -> all ABIs + universal
     val abiFilter =
