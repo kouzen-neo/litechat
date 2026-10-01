@@ -101,6 +101,11 @@ object HuggingFaceModelResolver {
 
             // Direct non-HuggingFace file URL (e.g. https://example.com/model.litertlm or GitHub release)
             if (!isHuggingFace) {
+                // B11: only https survives; the downloader additionally rejects
+                // non-public IPs on every redirect hop.
+                if (!raw.startsWith("https://", ignoreCase = true)) {
+                    return@withContext ResolveResult.Error("Only HTTPS download URLs are allowed.")
+                }
                 val fileName = raw.substringAfterLast("/").substringBefore("?").substringBefore("#").trim()
                 return@withContext if (fileName.isNotBlank() && isSupportedModelExtension(fileName)) {
                     ResolveResult.SingleFile(

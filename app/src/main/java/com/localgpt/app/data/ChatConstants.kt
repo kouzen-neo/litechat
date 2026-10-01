@@ -15,8 +15,11 @@ object ChatConstants {
     const val SOURCE_REMOTE = "remote"
 
     // ── Backend Types ────────────────────────────────────────────────
-    const val BACKEND_GPU = "gpu"
-    const val BACKEND_CPU = "cpu"
+    // NOTE: values are uppercase "GPU"/"CPU" — this matches what is persisted
+    // in DataStore and compared with equals(..., ignoreCase = true) across the
+    // codebase. The old lowercase "gpu"/"cpu" values were never referenced.
+    const val BACKEND_GPU = "GPU"
+    const val BACKEND_CPU = "CPU"
 
     // ── Theme Modes ──────────────────────────────────────────────────
     const val THEME_SYSTEM = "system"

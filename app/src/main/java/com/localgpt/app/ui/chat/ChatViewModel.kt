@@ -21,6 +21,7 @@ import com.localgpt.app.core.server.PromptBuilder
 import com.localgpt.app.data.ChatMessageEntry
 import com.localgpt.app.data.ChatRepository
 import com.localgpt.app.data.Conversation
+import com.localgpt.app.data.ConversationHeader
 import com.localgpt.app.data.DEFAULT_SYSTEM_PROMPT
 import com.localgpt.app.data.Settings
 import com.localgpt.app.data.SettingsRepository
@@ -153,7 +154,7 @@ class ChatViewModel(
     val isGenerating = mutableStateOf(false)
     val errorMessage = mutableStateOf<String?>(null)
     val installedModels = mutableStateOf<List<com.localgpt.app.localai.InstalledModel>>(emptyList())
-    val conversations = mutableStateOf<List<Conversation>>(emptyList())
+    val conversations = mutableStateOf<List<ConversationHeader>>(emptyList())
 
     val customPersonas = mutableStateListOf<PersonaPreset>()
     val isBenchmarking = mutableStateOf(false)
@@ -434,6 +435,24 @@ class ChatViewModel(
             (summary?.let { estimateTokens(it) } ?: 0)
     }
 
+    private var cachedContextTokens = 0
+    private var cachedContextTokensAt = 0L
+
+    /**
+     * Throttled variant of [effectiveContextTokens] for UI display. The full
+     * walk is O(n) over every message, so recomputing on each ~50ms token
+     * batch visibly degrades long chats. The status-bar counter converges
+     * within ~1s, which is plenty for display purposes.
+     */
+    fun effectiveContextTokensThrottled(): Int {
+        val now = System.currentTimeMillis()
+        if (now - cachedContextTokensAt >= 1_000L) {
+            cachedContextTokens = effectiveContextTokens()
+            cachedContextTokensAt = now
+        }
+        return cachedContextTokens
+    }
+
     private fun injectSummary(
         system: String,
         summary: String?,
@@ -642,7 +661,7 @@ class ChatViewModel(
 
     fun refreshConversations() {
         viewModelScope.launch {
-            conversations.value = chatRepo.listConversations()
+            conversations.value = chatRepo.listConversationHeaders()
         }
     }
 
@@ -763,11 +782,27 @@ class ChatViewModel(
         LiteRtEngineManager.clearLogs()
     }
 
-    fun exportAllConversationsJson(): String {
-        return com.google.gson.Gson().toJson(conversations.value)
+    /** Full-text body search across conversations; bodies are loaded on demand (P6). */
+    suspend fun searchConversationBodies(query: String): Set<String> =
+        chatRepo.listConversations()
+            .filter { conv -> conv.messages.any { it.content.contains(query, ignoreCase = true) } }
+            .map { it.id }
+            .toSet()
+
+    /** Full bodies are loaded on demand so the UI list stays on cheap headers (P6). */
+    suspend fun exportAllConversationsJson(): String {
+        return com.google.gson.Gson().toJson(chatRepo.listConversations())
     }
 
     fun exportChatMarkdown(conv: Conversation): String = chatRepo.exportToMarkdown(conv)
+
+    /** Loads the full conversation on demand for per-item export from header lists (P6). */
+    suspend fun exportChatMarkdownById(id: String): String =
+        chatRepo.get(id)?.let { chatRepo.exportToMarkdown(it) } ?: ""
+
+    /** Loads full bodies on demand for the "export all as markdown" share action (P6). */
+    suspend fun exportAllChatsMarkdown(): String =
+        chatRepo.listConversations().joinToString("\n\n---\n\n") { chatRepo.exportToMarkdown(it) }
 
     fun exportCurrentChatMarkdown(): String {
         val conv = conversation ?: return ""
@@ -847,7 +882,9 @@ class ChatViewModel(
         KLog.d("ChatVM", "Autonomous Tool Call: tool='${toolCall.name}', lang='${toolCall.lang}', raw='$rawQuery', resolved='$contextualQuery', subject='$subject'")
         val idx = messages.lastIndex
         val searchMsg = "Searching the web for \"$contextualQuery\"..."
-        if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
+        // B42: don't touch another conversation's messages if the user
+        // switched chats while the tool call was being prepared.
+        if (currentConversationId == targetChatId && idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
             messages[idx] = messages[idx].copy(content = searchMsg)
         }
 
@@ -915,6 +952,10 @@ class ChatViewModel(
             contextWindow = s.contextWindowTokens,
         )
 
+        // B42: the web search above is a network call — the user may have
+        // switched conversations meanwhile. Never mutate the new
+        // conversation's messages with this chat's tool-call state.
+        if (currentConversationId != targetChatId) return currentSources
         if (idx >= 0 && messages[idx].role == ChatConstants.ROLE_ASSISTANT) {
             messages[idx] = messages[idx].copy(content = "", sources = updatedSources)
         }
@@ -996,9 +1037,10 @@ class ChatViewModel(
             var ragSources: List<String>? = null
 
             val targetChatId = currentConversationId
-            genJob =
-                viewModelScope.launch {
-                    try {
+            // Single coroutine for the whole send flow: previously a redundant
+            // nested launch overwrote genJob mid-flight, so stopGeneration()
+            // could miss the outer job.
+            try {
                         val activeSummary = runCatching { ensureContextFit(s, modelPath) }.getOrNull()
                         val appliedWindow = activeSummary != null
                         val windowed = promptWindowMessages()
@@ -1070,13 +1112,15 @@ class ChatViewModel(
                             captureArtifacts(messages.lastOrNull()?.id, messages.lastOrNull()?.content.orEmpty())
                         }
                     }
-                }
         }
     }
 
     private fun sendRemoteMessage(body: String, s: Settings) {
         if (s.remoteBaseUrl.isBlank() || s.remoteModelId.isBlank()) {
             errorMessage.value = "Please configure Remote Base URL and select a model in Models tab."
+            // B1: sendMessage() already set isGenerating=true before calling us;
+            // reset it so the send button doesn't get stuck as a Stop button.
+            isGenerating.value = false
             return
         }
         if (conversation == null) conversation = Conversation().also { currentConversationId = it.id }
@@ -1550,10 +1594,10 @@ class ChatViewModel(
         downloader.startDownload(model)
     }
 
-    fun downloadCustomUrl(downloadUrl: String, fileName: String? = null, expectedSizeBytes: Long = 0L) {
+    fun downloadCustomUrl(downloadUrl: String, fileName: String? = null, expectedSizeBytes: Long = 0L, sha256: String? = null) {
         val fn = fileName?.ifBlank { null } ?: downloadUrl.substringAfterLast('/').substringBefore('?').ifBlank { "custom_model.litertlm" }
         val id = "custom_" + fn.hashCode()
-        downloader.startCustomDownload(id, fn, downloadUrl, expectedSizeBytes)
+        downloader.startCustomDownload(id, fn, downloadUrl, expectedSizeBytes, expectedSha256 = sha256)
     }
 
     fun cancelDownload(modelId: String) = downloader.cancelDownload(modelId)
@@ -1768,7 +1812,7 @@ class ChatViewModel(
             settingsRepo.setMaxTokens(512)
             settingsRepo.setContextWindowTokens(2048)
             settingsRepo.setPromptTemplateFormat("auto")
-            settingsRepo.setBackend("GPU")
+            settingsRepo.setBackend(ChatConstants.BACKEND_GPU)
         }
     }
 

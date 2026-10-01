@@ -5,6 +5,7 @@ import android.widget.Toast
 import com.localgpt.app.data.ChatConstants
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -39,7 +41,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -65,6 +66,7 @@ import com.localgpt.app.localai.LocalAiCatalog
 import com.localgpt.app.localai.LocalAiModel
 import com.localgpt.app.localai.LocalModelDownloader.DownloadState
 import com.localgpt.app.ui.chat.ChatViewModel
+import com.localgpt.app.ui.component.SettingsTextField
 
 /**
  * Dedicated Models Management Screen cleanly styled with Material 3 uniform cards,
@@ -92,8 +94,11 @@ fun ModelsScreen(
     val freeDiskGb = freeDiskBytes / (1024.0 * 1024.0 * 1024.0)
 
     var customUrlInput by remember { mutableStateOf("") }
-    var remoteUrlInput by remember(settings.remoteBaseUrl) { mutableStateOf(settings.remoteBaseUrl) }
-    var remoteKeyInput by remember(settings.remoteApiKey) { mutableStateOf(settings.remoteApiKey) }
+    // Mirrors of the remote text fields below, used by the "Fetch Remote Models" button.
+    // The fields themselves use SettingsTextField (focus-guarded one-way sync) so typing
+    // is never wiped by unrelated settings emissions; onValueChange keeps these in sync.
+    var remoteUrlInput by remember { mutableStateOf(settings.remoteBaseUrl) }
+    var remoteKeyInput by remember { mutableStateOf(settings.remoteApiKey) }
 
     val filePickerLauncher =
         rememberLauncherForActivityResult(
@@ -228,7 +233,7 @@ fun ModelsScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                listOf("GPU" to "GPU (OpenCL Snapdragon)", "CPU" to "CPU (Arm NEON)").forEach { (be, label) ->
+                                listOf(ChatConstants.BACKEND_GPU to "GPU (OpenCL Snapdragon)", ChatConstants.BACKEND_CPU to "CPU (Arm NEON)").forEach { (be, label) ->
                                     val isSelected = settings.backend.equals(be, ignoreCase = true)
                                     Surface(
                                         onClick = { viewModel.setBackend(be) },
@@ -618,8 +623,8 @@ fun ModelsScreen(
                             urlInput = customUrlInput,
                             onUrlInputChange = { customUrlInput = it },
                             hfToken = settings.huggingFaceToken,
-                            onStartDownload = { url, fileName, sizeBytes ->
-                                viewModel.downloadCustomUrl(url, fileName, sizeBytes)
+                            onStartDownload = { url, fileName, sizeBytes, sha256 ->
+                                viewModel.downloadCustomUrl(url, fileName, sizeBytes, sha256.ifBlank { null })
                                 Toast.makeText(context, "Download started: $fileName", Toast.LENGTH_SHORT).show()
                             },
                         )
@@ -648,31 +653,53 @@ fun ModelsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
 
-                            OutlinedTextField(
-                                value = remoteUrlInput,
-                                onValueChange = {
-                                    remoteUrlInput = it
-                                    viewModel.setRemoteBaseUrl(it)
-                                },
+                            SettingsTextField(
+                                initialValue = settings.remoteBaseUrl,
+                                onSave = { viewModel.setRemoteBaseUrl(it) },
+                                onValueChange = { remoteUrlInput = it },
                                 label = { Text("API Base URL") },
                                 placeholder = { Text("http://192.168.1.100:11434") },
-                                shape = RoundedCornerShape(12.dp),
-                                singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                             )
 
-                            OutlinedTextField(
-                                value = remoteKeyInput,
-                                onValueChange = {
-                                    remoteKeyInput = it
-                                    viewModel.setRemoteApiKey(it)
-                                },
+                            SettingsTextField(
+                                initialValue = settings.remoteApiKey,
+                                onSave = { viewModel.setRemoteApiKey(it) },
+                                onValueChange = { remoteKeyInput = it },
                                 label = { Text("API Key (Optional for Ollama)") },
                                 placeholder = { Text("sk-...") },
-                                shape = RoundedCornerShape(12.dp),
-                                singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                             )
+
+                            // S3: warn when the base URL is plain HTTP — the API key and
+                            // prompts are sent unencrypted. Blocking is not an
+                            // option: LAN Ollama instances typically serve HTTP.
+                            val urlForWarning = remoteUrlInput.ifBlank { settings.remoteBaseUrl }
+                            if (urlForWarning.trimStart().startsWith("http://", ignoreCase = true)) {
+                                Row(
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(MaterialTheme.colorScheme.errorContainer)
+                                            .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Warning,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        "Plain HTTP: your API key and prompts are sent unencrypted. " +
+                                            "Use https:// (e.g. via a reverse proxy) if you don't trust this network.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                }
+                            }
 
                             Button(
                                 onClick = { viewModel.fetchRemoteModels(remoteUrlInput, remoteKeyInput) },

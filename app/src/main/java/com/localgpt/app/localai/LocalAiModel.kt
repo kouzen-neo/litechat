@@ -1,5 +1,7 @@
 package com.localgpt.app.localai
 
+import com.localgpt.app.data.ChatConstants
+
 /**
  * Metadata definition for LiteRT-LM on-device language models (.litertlm / .task).
  */
@@ -12,7 +14,7 @@ data class LocalAiModel(
     val sizeDisplay: String,
     val description: String,
     val supportedLanguages: String,
-    val recommendedBackend: String = "GPU",
+    val recommendedBackend: String = ChatConstants.BACKEND_GPU,
     val recommendedTemp: Float = 0.2f,
     val recommendedTopK: Int = 40,
     val recommendedMaxTokens: Int = 512,
@@ -43,7 +45,7 @@ object LocalAiCatalog {
                 sizeDisplay = "2.41 GB",
                 description = "Google's flagship on-device model with strong multilingual and reasoning quality.",
                 supportedLanguages = "English, Indonesian, Japanese, Multilingual",
-                recommendedBackend = "GPU",
+                recommendedBackend = ChatConstants.BACKEND_GPU,
                 recommendedTemp = 0.2f,
                 recommendedTopK = 40,
                 recommendedMaxTokens = 512,
@@ -57,7 +59,7 @@ object LocalAiCatalog {
                 sizeDisplay = "3.41 GB",
                 description = "High-capacity 4B model with deep knowledge, complex reasoning, and coding capabilities.",
                 supportedLanguages = "English, Indonesian, Multilingual",
-                recommendedBackend = "GPU",
+                recommendedBackend = ChatConstants.BACKEND_GPU,
                 recommendedTemp = 0.2f,
                 recommendedTopK = 40,
                 recommendedMaxTokens = 512,
@@ -71,7 +73,7 @@ object LocalAiCatalog {
                 sizeDisplay = "557 MB",
                 description = "Ultra-compact Google Gemma 3 1B model optimized with int4 quantization for fast mobile chat.",
                 supportedLanguages = "English, Indonesian, Multilingual",
-                recommendedBackend = "GPU",
+                recommendedBackend = ChatConstants.BACKEND_GPU,
                 recommendedTemp = 0.2f,
                 recommendedTopK = 40,
                 recommendedMaxTokens = 512,
@@ -85,7 +87,7 @@ object LocalAiCatalog {
                 sizeDisplay = "1.92 GB",
                 description = "Official Alibaba Qwen 3 1.7B model with next-generation reasoning and instruction quality.",
                 supportedLanguages = "English, Chinese, Indonesian, Multilingual",
-                recommendedBackend = "GPU",
+                recommendedBackend = ChatConstants.BACKEND_GPU,
                 recommendedTemp = 0.2f,
                 recommendedTopK = 40,
                 recommendedMaxTokens = 512,
@@ -99,7 +101,7 @@ object LocalAiCatalog {
                 sizeDisplay = "585 MB",
                 description = "Next-gen ultra lightweight LiteRT model with rapid token generation and low RAM footprint.",
                 supportedLanguages = "English, Chinese, Multilingual",
-                recommendedBackend = "GPU",
+                recommendedBackend = ChatConstants.BACKEND_GPU,
                 recommendedTemp = 0.2f,
                 recommendedTopK = 40,
                 recommendedMaxTokens = 512,

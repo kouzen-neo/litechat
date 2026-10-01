@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.localgpt.app.util.CodeArtifacts
 import com.localgpt.app.util.FileSaver
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -116,7 +117,7 @@ fun MarkdownText(
                     BlockType.HEADER_1 -> {
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            text = annotate(block.text, scheme),
+                            text = rememberAnnotated(block.text, scheme),
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
                             color = if (color != Color.Unspecified) color else scheme.primary,
@@ -125,7 +126,7 @@ fun MarkdownText(
                     BlockType.HEADER_2 -> {
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            text = annotate(block.text, scheme),
+                            text = rememberAnnotated(block.text, scheme),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = if (color != Color.Unspecified) color else scheme.primary,
@@ -133,7 +134,7 @@ fun MarkdownText(
                     }
                     BlockType.HEADER_3 -> {
                         Text(
-                            text = annotate(block.text, scheme),
+                            text = rememberAnnotated(block.text, scheme),
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                             color = if (color != Color.Unspecified) color else scheme.onSurface,
@@ -147,7 +148,7 @@ fun MarkdownText(
                             Text("•", style = MaterialTheme.typography.bodyMedium, color = scheme.primary)
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = annotate(block.text, scheme),
+                                text = rememberAnnotated(block.text, scheme),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = color,
                             )
@@ -158,7 +159,7 @@ fun MarkdownText(
                             Text(block.language, style = MaterialTheme.typography.bodyMedium, color = scheme.primary, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                text = annotate(block.text, scheme),
+                                text = rememberAnnotated(block.text, scheme),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = color,
                             )
@@ -170,7 +171,7 @@ fun MarkdownText(
                     BlockType.PARAGRAPH -> {
                         if (block.text.isNotBlank()) {
                             Text(
-                                text = annotate(block.text, scheme),
+                                text = rememberAnnotated(block.text, scheme),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = color,
                             )
@@ -309,6 +310,9 @@ private fun CodeBlockCard(
     val scrollState = rememberScrollState()
     var copied by remember { mutableStateOf(false) }
     var savedName by remember { mutableStateOf<String?>(null) }
+    // B36: rapid taps used to stack delay-reset coroutines; keep the latest
+    // job and cancel it before starting a new one.
+    var copyResetJob by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -394,10 +398,12 @@ private fun CodeBlockCard(
                         onClick = {
                             onCopy()
                             copied = true
-                            scope.launch {
-                                delay(2000)
-                                copied = false
-                            }
+                            copyResetJob?.cancel()
+                            copyResetJob =
+                                scope.launch {
+                                    delay(2000)
+                                    copied = false
+                                }
                         },
                         modifier = Modifier.size(24.dp),
                     ) {
@@ -447,7 +453,7 @@ private fun BlockquoteCard(
         )
         Spacer(Modifier.width(8.dp))
         Text(
-            text = annotate(text, scheme),
+            text = rememberAnnotated(text, scheme),
             style = MaterialTheme.typography.bodyMedium,
             fontStyle = FontStyle.Italic,
             color = scheme.onSurfaceVariant,
@@ -501,7 +507,7 @@ private fun TableCard(
                                 .padding(horizontal = 8.dp),
                         ) {
                             Text(
-                                text = annotate(headerText, scheme),
+                                text = rememberAnnotated(headerText, scheme),
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary,
@@ -536,7 +542,7 @@ private fun TableCard(
                                 .padding(horizontal = 8.dp),
                         ) {
                             Text(
-                                text = annotate(cellText, scheme),
+                                text = rememberAnnotated(cellText, scheme),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 textAlign = align,
@@ -653,7 +659,7 @@ private fun parseBlocks(markdown: String): List<Block> {
             line.startsWith("> ") -> blocks.add(Block(BlockType.BLOCKQUOTE, line.removePrefix("> ").trim()))
             line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") ->
                 blocks.add(Block(BlockType.BULLET, line.trimStart().drop(2).trim()))
-            Regex("^\\d+\\.\\s").containsMatchIn(line.trimStart()) -> {
+            NUMBERED_LIST_REGEX.containsMatchIn(line.trimStart()) -> {
                 val num = line.trimStart().substringBefore(".") + "."
                 val rest = line.trimStart().substringAfter(".").trim()
                 blocks.add(Block(BlockType.NUMBERED, rest, num))
@@ -681,11 +687,26 @@ private fun isTableSeparator(line: String): Boolean {
     val cols = trimmed.trim('|').split('|')
     return cols.isNotEmpty() && cols.all { col ->
         val c = col.trim()
-        c.isNotEmpty() && c.matches(Regex("^:?-+:?$"))
+        c.isNotEmpty() && c.matches(TABLE_SEPARATOR_CELL_REGEX)
     }
 }
 
 private val INLINE_REGEX = Regex("(\\*\\*([^*]+?)\\*\\*)|(\\*([^*]+?)\\*)|(`([^`]+?)`)|(\\[([^\\]]+)\\]\\(([^)]+)\\))")
+
+// B32: hoisted — previously recompiled per line / per table cell.
+private val NUMBERED_LIST_REGEX = Regex("^\\d+\\.\\s")
+private val TABLE_SEPARATOR_CELL_REGEX = Regex("^:?-+:?$")
+
+/**
+ * B31: memoizes the regex-heavy [annotate] pass. Called from composition, so
+ * without remember every ~50ms token batch re-ran the inline-format regexes
+ * over the whole message (O(n²) while streaming long responses).
+ */
+@Composable
+private fun rememberAnnotated(
+    text: String,
+    scheme: ColorScheme,
+): AnnotatedString = remember(text, scheme) { annotate(text, scheme) }
 
 private fun annotate(
     text: String,

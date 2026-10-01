@@ -10,6 +10,7 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ThinkingConfig
+import com.localgpt.app.data.ChatConstants
 import com.localgpt.app.util.KLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -56,6 +57,9 @@ class LiteRtEngineManager private constructor(
         private val logScope = CoroutineScope(Dispatchers.IO)
         private var logFile: File? = null
 
+        /** Serializes disk writes so concurrent logEngine() calls cannot interleave lines (B20). */
+        private val logMutex = Mutex()
+
         fun initDiskLogging(context: Context) {
             if (logFile == null) {
                 val dir = File(context.cacheDir, "litert_logs").apply { mkdirs() }
@@ -72,9 +76,11 @@ class LiteRtEngineManager private constructor(
             _engineLogs.value = current
 
             logScope.launch {
-                try {
-                    logFile?.appendText("$formatted\n")
-                } catch (_: Throwable) {
+                logMutex.withLock {
+                    try {
+                        logFile?.appendText("$formatted\n")
+                    } catch (_: Throwable) {
+                    }
                 }
             }
         }
@@ -96,9 +102,11 @@ class LiteRtEngineManager private constructor(
         fun clearLogs() {
             _engineLogs.value = emptyList()
             logScope.launch {
-                try {
-                    logFile?.writeText("")
-                } catch (_: Throwable) {
+                logMutex.withLock {
+                    try {
+                        logFile?.writeText("")
+                    } catch (_: Throwable) {
+                    }
                 }
             }
         }
@@ -151,7 +159,7 @@ class LiteRtEngineManager private constructor(
         val topP: Float = 0.90f,
         val maxTokens: Int = 512,
         val contextWindow: Int = 2048,
-        val backend: String = "GPU", // "GPU" | "CPU"
+        val backend: String = ChatConstants.BACKEND_GPU, // "GPU" | "CPU"
         val systemPrompt: String = "",
         val enableThinking: Boolean = true,
     )
@@ -524,7 +532,7 @@ class LiteRtEngineManager private constructor(
 
             try {
                 val targetBackend =
-                    if (params.backend.equals("CPU", ignoreCase = true)) Backend.CPU() else Backend.GPU()
+                    if (params.backend.equals(ChatConstants.BACKEND_CPU, ignoreCase = true)) Backend.CPU() else Backend.GPU()
                 val initTarget = if (targetBackend is Backend.GPU) "OpenCL GPU shader cache" else "CPU XNNPack engine"
                 logEngine("[LiteRT Engine] Initializing $initTarget...")
 
@@ -542,7 +550,7 @@ class LiteRtEngineManager private constructor(
                 val visionBadge = if (visionOk) " + Vision" else " (Text Only)"
                 logEngine("[LiteRT Engine] ${params.backend}$visionBadge Initialization Successful (${initDuration}ms)")
             } catch (e: Exception) {
-                if (!params.backend.equals("CPU", ignoreCase = true)) {
+                if (!params.backend.equals(ChatConstants.BACKEND_CPU, ignoreCase = true)) {
                     logEngine("[WARN] GPU OpenCL rejected (${e.message ?: e.javaClass.simpleName}). Falling back to CPU (XNNPack)...")
                     KLog.w("LiteRT", "GPU OpenCL rejected, falling back to CPU: ${e.message}")
                     try {
@@ -646,7 +654,13 @@ class LiteRtEngineManager private constructor(
                     cacheDir = context.cacheDir.absolutePath,
                 ),
             )
-        textEng.initialize()
+        try {
+            textEng.initialize()
+        } catch (t: Throwable) {
+            // Mirror the vision path: never leak the half-built native engine.
+            closeQuietly(textEng)
+            throw t
+        }
         return Pair(textEng, false)
     }
 

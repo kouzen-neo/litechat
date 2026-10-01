@@ -26,13 +26,16 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import okhttp3.Call
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.File
 import java.io.FileOutputStream
+import java.net.InetAddress
 import java.net.URI
+import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -278,16 +281,22 @@ class ModelDownloadService : Service() {
 
         val cleanFileName = LocalModelManager.sanitizeModelFileName(fileName)
         val targetFile = File(modelsDir, cleanFileName)
-        val tempFile = File(modelsDir, "$cleanFileName.tmp")
+        // B10: key the resume temp file per download URL so resuming a
+        // different URL that happens to share the basename can never append
+        // foreign bytes to a stale .tmp.
+        val urlKey = sha256Hex(url).take(16)
+        val tempFile = File(modelsDir, "$cleanFileName.$urlKey.tmp")
+        // Drop stale resume files from other URLs (and the legacy unkeyed name).
+        modelsDir.listFiles { f ->
+            f.isFile && f.name.startsWith("$cleanFileName.") && f.name.endsWith(".tmp") && f != tempFile
+        }?.forEach { runCatching { it.delete() } }
+        runCatching { File(modelsDir, "$cleanFileName.tmp").takeIf { it.exists() }?.delete() }
 
         // Validate the checksum format up front so we fail fast instead of
         // downloading gigabytes before discovering the hash is unusable.
+        // (The throw itself lives inside the try below so a malformed checksum
+        // is routed to onServiceError instead of crashing the service.)
         val normalizedSha256 = expectedSha256?.trim()?.lowercase()?.ifEmpty { null }
-        if (normalizedSha256 != null && !normalizedSha256.matches(Regex("[0-9a-f]{64}"))) {
-            throw IllegalArgumentException(
-                "Invalid expected SHA-256 checksum for $name: must be 64 hex characters.",
-            )
-        }
 
         val existingBytes = if (tempFile.exists()) tempFile.length() else 0L
         // Tracks whether a terminal (completion/error) notification was already
@@ -304,6 +313,12 @@ class ModelDownloadService : Service() {
         )
 
         try {
+            if (normalizedSha256 != null && !normalizedSha256.matches(Regex("[0-9a-f]{64}"))) {
+                throw IllegalArgumentException(
+                    "Invalid expected SHA-256 checksum for $name: must be 64 hex characters.",
+                )
+            }
+
             val hfToken =
                 settingsRepo.settingsFlow
                     .first()
@@ -402,6 +417,19 @@ class ModelDownloadService : Service() {
                     }
                 if (!saved) throw IllegalStateException("Failed to save downloaded model file.")
 
+                // B22: never mark a 0-byte or truncated file as Completed.
+                val finalSize = targetFile.length()
+                if (finalSize <= 0L) {
+                    targetFile.delete()
+                    throw IllegalStateException("Downloaded file is empty; deleted.")
+                }
+                if (expectedSizeBytes > 0 && finalSize < expectedSizeBytes) {
+                    targetFile.delete()
+                    throw IllegalStateException(
+                        "Download incomplete: received $finalSize of $expectedSizeBytes expected bytes; deleted.",
+                    )
+                }
+
                 // Optional integrity check: delete the file loudly on mismatch.
                 if (normalizedSha256 != null) {
                     downloader.onServiceDownloading(id, 1f, downloaded, totalBytes, 0L, cleanFileName, "$name (verifying…)")
@@ -450,6 +478,43 @@ class ModelDownloadService : Service() {
         }
     }
 
+    /** Short SHA-256 hex of a string (used to key temp files per URL). */
+    private fun sha256Hex(input: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        return digest.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Parses [url], requiring the https scheme and a publicly-routable host.
+     * Called on the initial URL and on every redirect hop, so a redirect can
+     * neither downgrade to http nor bounce to an internal address (B11/SSRF).
+     */
+    private fun requirePublicHttpsUrl(url: String): HttpUrl {
+        val httpUrl = url.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid download URL")
+        if (!httpUrl.isHttps) {
+            throw IllegalArgumentException("Only HTTPS download URLs are allowed")
+        }
+        assertPublicHost(httpUrl.host)
+        return httpUrl
+    }
+
+    /** Rejects hosts that resolve to loopback / private / link-local / multicast IPs. */
+    private fun assertPublicHost(host: String) {
+        val addresses =
+            try {
+                InetAddress.getAllByName(host)
+            } catch (e: UnknownHostException) {
+                throw IllegalArgumentException("Cannot resolve download host: $host")
+            }
+        for (addr in addresses) {
+            if (addr.isLoopbackAddress || addr.isLinkLocalAddress || addr.isSiteLocalAddress ||
+                addr.isMulticastAddress || addr.isAnyLocalAddress
+            ) {
+                throw IllegalArgumentException("Download host resolves to a non-public IP address: $host")
+            }
+        }
+    }
+
     /** Computes the SHA-256 hex digest of [file] and compares it to [expectedHex]. */
     private fun verifySha256(
         file: File,
@@ -481,8 +546,8 @@ class ModelDownloadService : Service() {
         var attempts = 0
         while (attempts < 8) {
             attempts++
-            val httpUrl = currentUrl.toHttpUrlOrNull()
-                ?: throw IllegalArgumentException("Invalid URL: $currentUrl")
+            // Re-validated on every hop: https-only, public-IP-only (B11).
+            val httpUrl = requirePublicHttpsUrl(currentUrl)
             val host = httpUrl.host
             val isHfHost = host.equals("huggingface.co", ignoreCase = true) ||
                 host.equals("hf.co", ignoreCase = true) ||

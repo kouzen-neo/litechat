@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Auto Backup rules: chat history and non-sensitive settings are backed up,
+    but the following are EXCLUDED:
+    - EncryptedSharedPreferences files holding API tokens ("litechat_secrets"
+      and its "_fallback"; see SettingsRepository.SECURE_PREFS_NAME). Tokens
+      must never leave the device via backup.
+    - The DataStore settings file ("datastore/litechat_settings.preferences_pb";
+      see preferencesDataStore(name = "litechat_settings")). Legacy token keys
+      may still be present there on devices that migrated.
+    - Appended log files ("logs/"), which may contain sensitive text.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="litechat_secrets.xml" />
+    <exclude domain="sharedpref" path="litechat_secrets_fallback.xml" />
+    <exclude domain="file" path="datastore/litechat_settings.preferences_pb" />
+    <exclude domain="file" path="logs/" />
+</full-backup-content>

@@ -135,6 +135,7 @@ class ChatServerService : Service() {
                 topK = settings.topK,
                 topP = settings.topP,
                 maxTokens = settings.maxTokens,
+                contextWindow = settings.contextWindowTokens,
                 backend = settings.backend,
                 modelPath = modelPath,
             )

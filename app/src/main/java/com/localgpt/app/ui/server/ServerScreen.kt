@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -62,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.localgpt.app.core.server.OpenAiServer
+import com.localgpt.app.data.ChatConstants
 import com.localgpt.app.ui.chat.ChatViewModel
 import com.localgpt.app.util.NetworkUtils
 import java.util.Locale
@@ -318,6 +320,36 @@ fun ServerScreen(
                                 onCheckedChange = { viewModel.setServerBindAll(it) },
                             )
                         }
+
+                        // Security warning: LAN mode without an API key exposes the
+                        // server to everyone on the Wi-Fi network. (Fail-closed
+                        // enforcement at the server layer is handled separately.)
+                        if (settings.serverBindAll && settings.serverAuthToken.isBlank()) {
+                            Row(
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(MaterialTheme.colorScheme.errorContainer)
+                                        .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    Icons.Filled.Warning,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    "Security warning: LAN mode is ON but no API key is set — " +
+                                        "anyone on your Wi-Fi network can use this device as an AI server. " +
+                                        "Set an API key above.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -560,7 +592,7 @@ curl -N $serverEndpoint/chat/completions \
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                listOf("GPU" to "GPU (OpenCL Snapdragon)", "CPU" to "CPU (Arm NEON)").forEach { (be, label) ->
+                                listOf(ChatConstants.BACKEND_GPU to "GPU (OpenCL Snapdragon)", ChatConstants.BACKEND_CPU to "CPU (Arm NEON)").forEach { (be, label) ->
                                     val isSelected = settings.backend.equals(be, ignoreCase = true)
                                     Surface(
                                         onClick = { viewModel.setBackend(be) },

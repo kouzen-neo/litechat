@@ -4,6 +4,8 @@ import com.localgpt.app.data.ChatConstants
 import com.localgpt.app.util.KLog
 import com.localgpt.app.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -13,6 +15,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedReader
 
 data class RemoteModelItem(
     val id: String,
@@ -29,6 +32,27 @@ object RemoteAiClient {
     private val client = NetworkUtils.HttpClient.streamingClient
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+    /** Max chars buffered for a single SSE line; overlong lines are truncated. */
+    private const val MAX_SSE_LINE_CHARS = 1_000_000
+
+    /**
+     * Reads one line, capping the buffered length at [MAX_SSE_LINE_CHARS] so a
+     * malicious server cannot OOM the client with an unbounded line. Overlong
+     * lines are still consumed (the stream stays aligned) but truncated.
+     * Returns null only at end-of-stream with no pending characters.
+     */
+    private fun BufferedReader.readBoundedLine(maxChars: Int = MAX_SSE_LINE_CHARS): String? {
+        val sb = StringBuilder()
+        while (true) {
+            val c = read()
+            if (c == -1) return if (sb.isEmpty()) null else sb.toString()
+            val ch = c.toChar()
+            if (ch == '\n') return sb.toString()
+            if (ch == '\r') continue
+            if (sb.length < maxChars) sb.append(ch)
+        }
+    }
 
     suspend fun fetchModels(baseUrl: String, apiKey: String = ""): Result<List<RemoteModelItem>> =
         withContext(Dispatchers.IO) {
@@ -115,6 +139,15 @@ object RemoteAiClient {
             }
 
             val response = client.newCall(reqBuilder.build()).execute()
+            // Close the connection promptly when the collecting coroutine is
+            // cancelled, instead of blocking in readLine() until the next
+            // chunk or socket timeout.
+            currentCoroutineContext().job.invokeOnCancellation {
+                try {
+                    response.close()
+                } catch (_: Exception) {
+                }
+            }
             try {
                 if (!response.isSuccessful) {
                     throw IllegalStateException("Remote server error: HTTP ${response.code} (${response.message})")
@@ -123,7 +156,7 @@ object RemoteAiClient {
                 val reader = response.body?.byteStream()?.bufferedReader() ?: return@flow
                 try {
                     while (true) {
-                        val line = reader.readLine() ?: break
+                        val line = reader.readBoundedLine() ?: break
                         val trimmed = line.trim()
                         if (trimmed.startsWith("data:")) {
                             val data =

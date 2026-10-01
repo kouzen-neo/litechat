@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 
@@ -34,6 +35,17 @@ class SkillsManager private constructor(private val context: Context) {
          * eat most of the window meant for the conversation.
          */
         private const val MAX_ACTIVE_INSTRUCTIONS_CHARS = 4000
+
+        /**
+         * Import size caps (B27). Skill files arrive from outside the app —
+         * potentially huge — and are later serialized to JSON / embedded in the
+         * prompt. Without bounds, one oversized file can exhaust memory or
+         * silently bloat the prompt. Oversized imports are rejected outright,
+         * and long instruction bodies are truncated at import time.
+         */
+        private const val MAX_IMPORT_BYTES = 200_000
+        private const val MAX_IMPORT_CHARS = 200_000
+        private const val MAX_IMPORTED_INSTRUCTIONS_CHARS = 20_000
 
         val BUILTIN_SKILLS = listOf(
             Skill(
@@ -261,9 +273,9 @@ Once search results are provided in the context, synthesize the facts directly i
     suspend fun importFromUri(uri: Uri): Skill? = withContext(Dispatchers.IO) {
         try {
             val fileName = queryDisplayName(uri) ?: "imported_skill.md"
-            val text = context.contentResolver.openInputStream(uri)?.use { stream ->
-                stream.bufferedReader(Charsets.UTF_8).readText()
-            } ?: return@withContext null
+            // Bounded read: never pull more than MAX_IMPORT_BYTES from the
+            // content provider into memory (B27).
+            val text = readBoundedText(uri) ?: return@withContext null
             importFromText(text, fileName)
         } catch (e: Exception) {
             KLog.e("Skills", "Failed to import skill from URI: ${e.message}")
@@ -271,8 +283,37 @@ Once search results are provided in the context, synthesize the facts directly i
         }
     }
 
+    /** Reads up to [MAX_IMPORT_BYTES] from [uri]; null when over the limit or unreadable. */
+    private fun readBoundedText(uri: Uri): String? =
+        try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                val out = ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > MAX_IMPORT_BYTES) {
+                        KLog.e("Skills", "Skill file too large (> $MAX_IMPORT_BYTES bytes); import rejected")
+                        return null
+                    }
+                    out.write(buf, 0, n)
+                }
+                out.toString(Charsets.UTF_8.name())
+            }
+        } catch (e: Exception) {
+            KLog.e("Skills", "Failed to read skill file: ${e.message}")
+            null
+        }
+
     suspend fun importFromText(rawText: String, fileName: String? = null): Skill? = withContext(Dispatchers.IO) {
         if (rawText.isBlank()) return@withContext null
+        // Reject oversized input before parsing/serializing anything (B27).
+        if (rawText.length > MAX_IMPORT_CHARS) {
+            KLog.e("Skills", "Skill text too large (${rawText.length} chars > $MAX_IMPORT_CHARS); import rejected")
+            return@withContext null
+        }
         try {
             // Check if JSON format
             if (rawText.trimStart().startsWith("{")) {
@@ -282,8 +323,12 @@ Once search results are provided in the context, synthesize the facts directly i
                         id = UUID.randomUUID().toString(),
                         name = parsed.name.take(80),
                         description = parsed.description.take(200),
+                        instructions = truncateInstructions(parsed.instructions),
                         category = parsed.category.take(30),
                         isBuiltIn = false,
+                        // B9: imported JSON may claim isEnabled=true; untrusted
+                        // prompt text must always start disabled.
+                        isEnabled = false,
                         createdAt = System.currentTimeMillis()
                     )
                     saveSkill(skill)
@@ -318,10 +363,13 @@ Once search results are provided in the context, synthesize the facts directly i
                 id = UUID.randomUUID().toString(),
                 name = name.take(80),
                 description = description.take(200),
-                instructions = instructions,
+                instructions = truncateInstructions(instructions),
                 category = category.take(30),
                 iconCategory = iconCategory,
-                isEnabled = true,
+                // Imported skills are untrusted prompt text: always default to
+                // DISABLED so nothing enters the prompt until the user has
+                // reviewed the instructions and explicitly enables it (B9).
+                isEnabled = false,
                 isBuiltIn = false,
                 createdAt = System.currentTimeMillis(),
             )
@@ -331,6 +379,17 @@ Once search results are provided in the context, synthesize the facts directly i
             KLog.e("Skills", "Import text parsing error: ${e.message}")
             null
         }
+    }
+
+    /**
+     * Truncates an imported instruction body to [MAX_IMPORTED_INSTRUCTIONS_CHARS]
+     * so one giant skill can't silently bloat the persisted JSON or the prompt
+     * block (B27). The cut is logged — the rest of the import still succeeds.
+     */
+    private fun truncateInstructions(instructions: String): String {
+        if (instructions.length <= MAX_IMPORTED_INSTRUCTIONS_CHARS) return instructions
+        KLog.w("Skills", "Skill instructions truncated from ${instructions.length} to $MAX_IMPORTED_INSTRUCTIONS_CHARS chars")
+        return instructions.take(MAX_IMPORTED_INSTRUCTIONS_CHARS) + "\n…[truncated on import]"
     }
 
     suspend fun exportSkill(skill: Skill): File? = withContext(Dispatchers.IO) {

@@ -2,7 +2,6 @@ package com.localgpt.app.ui.chat
 
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -66,6 +65,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -87,8 +87,10 @@ import com.localgpt.app.data.ChatMessageEntry
 import com.localgpt.app.ui.component.MarkdownText
 import com.localgpt.app.ui.component.SearchSourcesCard
 import com.localgpt.app.web.WebSourceCitation
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
@@ -479,18 +481,16 @@ internal fun MessageBubble(
 
                 // Attached Image if present
                 if (!message.imagePath.isNullOrBlank()) {
-                    val imgFile = remember(message.imagePath) { File(message.imagePath) }
-                    val bitmap = remember(message.imagePath) {
-                        try {
-                            if (imgFile.exists()) {
-                                val opts = BitmapFactory.Options().apply {
-                                    inPreferredConfig = Bitmap.Config.RGB_565
+                    val imagePath = message.imagePath
+                    // B38: decode off the main thread, downsampled to bubble
+                    // width (was: main-thread full-size decode in remember).
+                    val bitmap by produceState<Bitmap?>(initialValue = null, imagePath) {
+                        value =
+                            withContext(Dispatchers.IO) {
+                                imagePath?.let { path ->
+                                    decodeSampledBitmapFromFile(File(path), reqSizePx = 1024)
                                 }
-                                BitmapFactory.decodeFile(imgFile.absolutePath, opts)
-                            } else null
-                        } catch (_: Throwable) {
-                            null
-                        }
+                            }
                     }
                     // Recycle bitmap when imagePath changes or composable leaves composition
                     DisposableEffect(bitmap) {

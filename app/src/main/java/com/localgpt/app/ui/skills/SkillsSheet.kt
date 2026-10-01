@@ -52,6 +52,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -85,6 +86,7 @@ fun SkillsSheet(
     val skills by viewModel.skills.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
+    var pendingImportReview by remember { mutableStateOf<Skill?>(null) }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -93,7 +95,9 @@ fun SkillsSheet(
             scope.launch {
                 val imported = SkillsManager.getInstance(context).importFromUri(uri)
                 if (imported != null) {
-                    Toast.makeText(context, "Skill '${imported.name}' imported successfully", Toast.LENGTH_SHORT).show()
+                    // Imported skills stay disabled until the user reviews the
+                    // instructions and explicitly enables them (B9).
+                    pendingImportReview = imported
                 } else {
                     Toast.makeText(context, "Failed to import skill file", Toast.LENGTH_SHORT).show()
                 }
@@ -344,6 +348,18 @@ fun SkillsSheet(
                 }
             }
         }
+    }
+
+    // ── Import Review Dialog (B9): preview instructions before enabling ──
+    pendingImportReview?.let { skill ->
+        SkillImportReviewDialog(
+            skill = skill,
+            onEnable = {
+                scope.launch { SkillsManager.getInstance(context).toggleSkill(skill.id, true) }
+                pendingImportReview = null
+            },
+            onDismiss = { pendingImportReview = null },
+        )
     }
 }
 

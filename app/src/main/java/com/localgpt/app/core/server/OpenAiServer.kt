@@ -14,17 +14,21 @@ import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.header
 import io.ktor.server.plugins.origin
-import io.ktor.server.request.receiveText
+import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respondText
 import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.get
 import io.ktor.server.routing.options
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import io.ktor.utils.io.cancel
+import io.ktor.utils.io.isClosedForRead
+import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -128,10 +132,65 @@ object OpenAiServer {
         val maxTokens: Int,
         val backend: String,
         val modelPath: String,
+        /**
+         * Single context-window source of truth, shared by [PromptBuilder]
+         * truncation and [LiteRtEngineManager.EngineParams] (B4).
+         */
+        val contextWindow: Int = 2048,
     )
 
     private val gson = Gson()
     private var server: EmbeddedServer<*, *>? = null
+
+    /** Guards start()/stop() so two embedded servers can never be created (B19). */
+    private val lifecycleLock = Any()
+
+    /**
+     * Shared bearer-token check; true when the request may proceed.
+     * No token configured = open access (unchanged legacy behavior).
+     */
+    private suspend fun ApplicationCall.checkAuth(config: Config): Boolean {
+        val token = config.authToken
+        if (token.isNotBlank()) {
+            val provided = request.header("Authorization")?.removePrefix("Bearer ")?.trim()
+            if (provided != token) {
+                respondText(
+                    errorJson("invalid_api_key", "Invalid or missing API key"),
+                    ContentType.Application.Json,
+                    HttpStatusCode.Unauthorized,
+                )
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * Central validation for client-supplied sampler parameters (B13).
+     * Never throws: out-of-range values are clamped into the safe range, and
+     * max_tokens of 0/negative becomes 1 instead of "unlimited".
+     */
+    internal fun clampSampler(
+        temperature: Float?,
+        topK: Int?,
+        topP: Float?,
+        maxTokens: Int?,
+        config: Config,
+        systemPrompt: String,
+    ): LiteRtEngineManager.EngineParams {
+        val baseTemp = config.temperature.takeUnless { it.isNaN() } ?: 0.7f
+        val baseTopP = config.topP.takeUnless { it.isNaN() } ?: 0.9f
+        return LiteRtEngineManager.EngineParams(
+            modelPath = config.modelPath,
+            temperature = (temperature?.takeUnless { it.isNaN() } ?: baseTemp).coerceIn(0f, 2f),
+            topK = (topK ?: config.topK).coerceAtLeast(1),
+            topP = (topP?.takeUnless { it.isNaN() } ?: baseTopP).coerceIn(0f, 1f),
+            maxTokens = (maxTokens ?: config.maxTokens).coerceIn(1, 8192),
+            backend = config.backend,
+            contextWindow = config.contextWindow,
+            systemPrompt = systemPrompt,
+        )
+    }
 
     private val _status = MutableStateFlow<Status>(Status.Stopped)
     val status: StateFlow<Status> = _status.asStateFlow()
@@ -159,86 +218,118 @@ object OpenAiServer {
     /**
      * Reads the request body, rejecting oversized payloads with 413.
      * Returns null when the request was already answered with an error.
+     *
+     * The body is consumed through the channel with a bounded accumulator so
+     * a chunked body without Content-Length cannot fill RAM before the limit
+     * is enforced (B8).
      */
     private suspend fun ApplicationCall.receiveTextLimited(): String? {
         val declared = request.header(HttpHeaders.ContentLength)?.toLongOrNull()
         if (declared != null && declared > MAX_BODY_BYTES) {
-            respondText(
-                errorJson("invalid_request_error", "Request body too large (max 2 MB)"),
-                ContentType.Application.Json,
-                HttpStatusCode.PayloadTooLarge,
-            )
+            respondTooLarge()
             return null
         }
-        val text = receiveText()
-        if (text.toByteArray().size > MAX_BODY_BYTES) {
-            respondText(
-                errorJson("invalid_request_error", "Request body too large (max 2 MB)"),
-                ContentType.Application.Json,
-                HttpStatusCode.PayloadTooLarge,
-            )
-            return null
+        val channel = receiveChannel()
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0
+        while (!channel.isClosedForRead) {
+            val n = channel.readAvailable(buf)
+            if (n == -1) break
+            total += n
+            if (total > MAX_BODY_BYTES) {
+                respondTooLarge()
+                try {
+                    channel.cancel()
+                } catch (_: Exception) {
+                }
+                return null
+            }
+            out.write(buf, 0, n)
         }
-        return text
+        return out.toString(Charsets.UTF_8)
+    }
+
+    private suspend fun ApplicationCall.respondTooLarge() {
+        respondText(
+            errorJson("invalid_request_error", "Request body too large (max 2 MB)"),
+            ContentType.Application.Json,
+            HttpStatusCode.PayloadTooLarge,
+        )
     }
 
     fun start(config: Config, engineManager: LiteRtEngineManager) {
-        if (_status.value is Status.Running || _status.value is Status.Starting) return
-        _status.value = Status.Starting
-        try {
-            val host = if (config.bindAll) "0.0.0.0" else "127.0.0.1"
-            val srv =
-                embeddedServer(CIO, host = host, port = config.port) {
-                    routing {
-                        // Global CORS preflight handler
-                        options("{...}") {
-                            call.response.headers.append("Access-Control-Allow-Origin", "*")
-                            call.response.headers.append("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
-                            call.response.headers.append("Access-Control-Allow-Headers", "*")
-                            call.respondText("")
-                        }
-                        get("/health") {
-                            call.response.headers.append("Access-Control-Allow-Origin", "*")
-                            call.respondText("ok")
-                        }
-                        get("/v1/models") {
-                            call.response.headers.append("Access-Control-Allow-Origin", "*")
-                            call.respondText(modelsJson(config.modelId()), ContentType.Application.Json)
-                        }
-                        get("/v1/models/{model}") {
-                            call.response.headers.append("Access-Control-Allow-Origin", "*")
-                            val requestedModel = call.parameters["model"] ?: config.modelId()
-                            call.respondText(modelDetailJson(requestedModel), ContentType.Application.Json)
-                        }
-                        post("/v1/chat/completions") {
-                            call.response.headers.append("Access-Control-Allow-Origin", "*")
-                            call.handleChatCompletion(config, engineManager)
-                        }
-                        post("/v1/completions") {
-                            call.response.headers.append("Access-Control-Allow-Origin", "*")
-                            call.handleRawCompletion(config, engineManager)
+        synchronized(lifecycleLock) {
+            if (_status.value is Status.Running || _status.value is Status.Starting) return
+            // S1: fail closed — never expose the server to the LAN without an
+            // API token, even if the user enabled bind-all mode.
+            if (config.bindAll && config.authToken.isBlank()) {
+                val msg = "Refusing to start: bind-all (LAN) mode requires a non-empty API token"
+                KLog.e("OpenAiServer", msg)
+                _status.value = Status.Error(msg)
+                return
+            }
+            _status.value = Status.Starting
+            try {
+                val host = if (config.bindAll) "0.0.0.0" else "127.0.0.1"
+                val srv =
+                    embeddedServer(CIO, host = host, port = config.port) {
+                        routing {
+                            // Global CORS preflight handler
+                            options("{...}") {
+                                call.response.headers.append("Access-Control-Allow-Origin", "*")
+                                call.response.headers.append("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+                                call.response.headers.append("Access-Control-Allow-Headers", "*")
+                                call.respondText("")
+                            }
+                            get("/health") {
+                                if (!call.checkAuth(config)) return@get
+                                call.response.headers.append("Access-Control-Allow-Origin", "*")
+                                call.respondText("ok")
+                            }
+                            get("/v1/models") {
+                                if (!call.checkAuth(config)) return@get
+                                call.response.headers.append("Access-Control-Allow-Origin", "*")
+                                call.respondText(modelsJson(config.modelId()), ContentType.Application.Json)
+                            }
+                            get("/v1/models/{model}") {
+                                if (!call.checkAuth(config)) return@get
+                                call.response.headers.append("Access-Control-Allow-Origin", "*")
+                                val requestedModel = call.parameters["model"] ?: config.modelId()
+                                call.respondText(modelDetailJson(requestedModel), ContentType.Application.Json)
+                            }
+                            post("/v1/chat/completions") {
+                                call.response.headers.append("Access-Control-Allow-Origin", "*")
+                                call.handleChatCompletion(config, engineManager)
+                            }
+                            post("/v1/completions") {
+                                call.response.headers.append("Access-Control-Allow-Origin", "*")
+                                call.handleRawCompletion(config, engineManager)
+                            }
                         }
                     }
-                }
-            server = srv
-            srv.start(wait = false)
-            _status.value = Status.Running(config.port, config.bindAll)
-            KLog.d("OpenAiServer", "Listening on http://$host:${config.port}/v1")
-        } catch (e: Exception) {
-            KLog.e("OpenAiServer", "Failed to start on port ${config.port}", e)
-            _status.value = Status.Error(e.message ?: e.javaClass.simpleName)
-            server = null
+                server = srv
+                srv.start(wait = false)
+                _status.value = Status.Running(config.port, config.bindAll)
+                KLog.d("OpenAiServer", "Listening on http://$host:${config.port}/v1")
+            } catch (e: Exception) {
+                KLog.e("OpenAiServer", "Failed to start on port ${config.port}", e)
+                _status.value = Status.Error(e.message ?: e.javaClass.simpleName)
+                server = null
+            }
         }
     }
 
     fun stop() {
-        try {
-            server?.stop(500, 1500)
-        } catch (_: Exception) {
+        synchronized(lifecycleLock) {
+            try {
+                server?.stop(500, 1500)
+            } catch (_: Exception) {
+            }
+            server = null
+            _status.value = Status.Stopped
+            KLog.d("OpenAiServer", "Server stopped")
         }
-        server = null
-        _status.value = Status.Stopped
-        KLog.d("OpenAiServer", "Server stopped")
     }
 
     private fun Config.modelId(): String =
@@ -248,19 +339,7 @@ object OpenAiServer {
         config: Config,
         engineManager: LiteRtEngineManager,
     ) {
-        // Optional bearer auth
-        val token = config.authToken
-        if (token.isNotBlank()) {
-            val provided = request.header("Authorization")?.removePrefix("Bearer ")?.trim()
-            if (provided != token) {
-                respondText(
-                    errorJson("invalid_api_key", "Invalid or missing API key"),
-                    ContentType.Application.Json,
-                    HttpStatusCode.Unauthorized,
-                )
-                return
-            }
-        }
+        if (!checkAuth(config)) return
 
         // Rate limiting (keyed by the real connection IP, not a client header)
         val clientHost = remoteIp()
@@ -293,16 +372,21 @@ object OpenAiServer {
         val isStream = request.stream == true
 
         val modelId = config.modelId()
-        val prompt = PromptBuilder.build(request.messages, config.systemPrompt, modelPath = config.modelPath)
-        val params =
-            LiteRtEngineManager.EngineParams(
+        val prompt =
+            PromptBuilder.build(
+                request.messages,
+                config.systemPrompt,
                 modelPath = config.modelPath,
-                temperature = request.temperature ?: config.temperature,
-                topK = request.top_k ?: config.topK,
-                topP = request.top_p ?: config.topP,
-                maxTokens = request.max_tokens ?: config.maxTokens,
-                backend = config.backend,
-                systemPrompt = config.systemPrompt,
+                contextWindow = config.contextWindow,
+            )
+        val params =
+            clampSampler(
+                request.temperature,
+                request.top_k,
+                request.top_p,
+                request.max_tokens,
+                config,
+                config.systemPrompt,
             )
 
         _requestCount.update { it + 1 }
@@ -344,7 +428,7 @@ object OpenAiServer {
                     try {
                         // Signal the truncation instead of letting the client
                         // mistake a bare [DONE] for a clean finish.
-                        write(SseProtocol.errorChunk(e.message ?: "Generation failed"))
+                        write(SseProtocol.errorChunk("Generation failed"))
                         write("\n\n")
                         write(SseProtocol.done())
                         write("\n\n")
@@ -388,7 +472,7 @@ object OpenAiServer {
             } catch (e: Exception) {
                 KLog.e("OpenAiServer", "Generation failed", e)
                 respondText(
-                    errorJson("generation_failed", e.message ?: "Generation failed"),
+                    errorJson("generation_failed", "Generation failed"),
                     ContentType.Application.Json,
                     HttpStatusCode.InternalServerError,
                 )
@@ -412,18 +496,7 @@ object OpenAiServer {
         config: Config,
         engineManager: LiteRtEngineManager,
     ) {
-        val token = config.authToken
-        if (token.isNotBlank()) {
-            val provided = request.header("Authorization")?.removePrefix("Bearer ")?.trim()
-            if (provided != token) {
-                respondText(
-                    errorJson("invalid_api_key", "Invalid or missing API key"),
-                    ContentType.Application.Json,
-                    HttpStatusCode.Unauthorized,
-                )
-                return
-            }
-        }
+        if (!checkAuth(config)) return
 
         // Rate limiting (keyed by the real connection IP, not a client header)
         val clientHost = remoteIp()
@@ -463,14 +536,13 @@ object OpenAiServer {
         val effectivePrompt = if (requestSystem != null) "$requestSystem\n\n$prompt" else prompt
 
         val params =
-            LiteRtEngineManager.EngineParams(
-                modelPath = config.modelPath,
-                temperature = request.temperature ?: config.temperature,
-                topK = request.top_k ?: config.topK,
-                topP = request.top_p ?: config.topP,
-                maxTokens = request.max_tokens ?: config.maxTokens,
-                backend = config.backend,
-                systemPrompt = request.system ?: config.systemPrompt,
+            clampSampler(
+                request.temperature,
+                request.top_k,
+                request.top_p,
+                request.max_tokens,
+                config,
+                request.system ?: config.systemPrompt,
             )
 
         _requestCount.update { it + 1 }
@@ -508,7 +580,7 @@ object OpenAiServer {
                     KLog.e("OpenAiServer", "Raw streaming failed", e)
                     try {
                         // Signal the truncation instead of closing the stream silently.
-                        write(SseProtocol.errorChunk(e.message ?: "Generation failed"))
+                        write(SseProtocol.errorChunk("Generation failed"))
                         write("\n\n")
                         write(SseProtocol.done())
                         write("\n\n")
@@ -552,7 +624,7 @@ object OpenAiServer {
             } catch (e: Exception) {
                 KLog.e("OpenAiServer", "Raw generation failed", e)
                 respondText(
-                    errorJson("generation_failed", e.message ?: "Generation failed"),
+                    errorJson("generation_failed", "Generation failed"),
                     ContentType.Application.Json,
                     HttpStatusCode.InternalServerError,
                 )

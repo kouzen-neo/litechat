@@ -2,6 +2,7 @@ package com.localgpt.app.util
 
 import android.content.Context
 import android.util.Log
+import com.localgpt.app.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,8 +25,13 @@ import java.util.Locale
  * which would crash a passing test. Falls back to stderr so the message is
  * still visible when the code runs on the JVM (unit tests).
  *
- * Every message is appended to an in-app ring buffer ([entries]) and persisted
- * to disk ([logFile]) so that logs survive crashes, force closes, and process restarts.
+ * Every message is appended to an in-app ring buffer ([entries]).
+ *
+ * Release builds ([BuildConfig.DEBUG] == false) never write to logcat and never
+ * persist logs to disk — the in-memory buffer keeps the in-app Logs screen
+ * working without leaking potentially sensitive text (e.g. user queries) to
+ * persistent storage. Debug builds additionally persist to [logFile] so logs
+ * survive crashes, force closes, and process restarts.
  */
 object KLog {
     const val MAX_BUFFER = 500
@@ -48,8 +54,11 @@ object KLog {
     /**
      * Initializes disk persistence from application context.
      * Loads previous session logs from disk into the in-memory buffer.
+     *
+     * No-op on release builds: logs are never persisted to disk there.
      */
     fun init(context: Context) {
+        if (!BuildConfig.DEBUG) return
         try {
             val logsDir = File(context.filesDir, "logs").apply { if (!exists()) mkdirs() }
             val file = File(logsDir, "app_logs.txt")
@@ -113,18 +122,25 @@ object KLog {
         isError: Boolean,
         isWarning: Boolean,
     ) {
-        try {
-            when (level) {
-                Log.ERROR -> Log.e(tag, msg)
-                Log.WARN -> Log.w(tag, msg)
-                else -> Log.d(tag, msg)
+        // Release builds: never write to logcat (may carry sensitive text).
+        if (BuildConfig.DEBUG) {
+            try {
+                when (level) {
+                    Log.ERROR -> Log.e(tag, msg)
+                    Log.WARN -> Log.w(tag, msg)
+                    else -> Log.d(tag, msg)
+                }
+            } catch (_: Throwable) {
+                // JVM unit test environment: android.util.Log throws "not mocked".
+                System.err.println("[$tag] $msg")
             }
-        } catch (_: Throwable) {
-            // JVM unit test environment: android.util.Log throws "not mocked".
-            System.err.println("[$tag] $msg")
         }
 
+        // In-memory ring buffer is always kept so the in-app Logs screen works.
         _entries.update { (it + LogEntry(msg, isError, isWarning)).takeLast(MAX_BUFFER) }
+
+        // Release builds: never persist logs to disk.
+        if (!BuildConfig.DEBUG) return
 
         // Persist to disk asynchronously
         logFile?.let { file ->

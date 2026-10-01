@@ -51,11 +51,13 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,11 +68,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.localgpt.app.data.Conversation
+import com.localgpt.app.data.ConversationHeader
 import com.localgpt.app.ui.chat.ChatViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private enum class HistorySortMode { TIME, NAME }
 
@@ -101,26 +105,44 @@ fun HistoryScreen(
     val conversations = viewModel.conversations.value
     val activeConvId = viewModel.currentConversationId
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var query by remember { mutableStateOf("") }
     var sortMode by remember { mutableStateOf(HistorySortMode.TIME) }
     var sortDescending by remember { mutableStateOf(true) }
 
-    var renameTarget by remember { mutableStateOf<Conversation?>(null) }
+    var renameTarget by remember { mutableStateOf<ConversationHeader?>(null) }
     var renameTitle by remember { mutableStateOf("") }
-    var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
+    var deleteTarget by remember { mutableStateOf<ConversationHeader?>(null) }
     var showClearAllConfirm by remember { mutableStateOf(false) }
 
+    var bodyMatchIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var bodySearchQuery by remember { mutableStateOf("") }
+
+    // Full-text body search runs debounced on demand; bodies are NOT parsed for the
+    // default list view (P6). Title matches show instantly, body matches stream in.
+    LaunchedEffect(query) {
+        if (query.isBlank()) {
+            bodyMatchIds = emptySet()
+            bodySearchQuery = ""
+            return@LaunchedEffect
+        }
+        delay(350)
+        val q = query
+        bodyMatchIds = viewModel.searchConversationBodies(q)
+        bodySearchQuery = q
+    }
+
     val filteredList =
-        remember(conversations, query, sortMode, sortDescending) {
+        remember(conversations, query, sortMode, sortDescending, bodyMatchIds, bodySearchQuery) {
             var list =
                 if (query.isBlank()) {
                     conversations
                 } else {
                     conversations.filter {
                         it.title.contains(query, ignoreCase = true) ||
-                            it.messages.any { m -> m.content.contains(query, ignoreCase = true) }
+                            (query == bodySearchQuery && bodyMatchIds.contains(it.id))
                     }
                 }
             list =
@@ -356,7 +378,7 @@ fun HistoryScreen(
                         items(filteredList, key = { it.id }) { conv ->
                             val isActive = conv.id == activeConvId
                             val dateFormatted = SimpleDateFormat("MMM d, yyyy · HH:mm", Locale.getDefault()).format(Date(conv.updatedAt))
-                            val rawLastMsg = conv.messages.lastOrNull()?.content ?: ""
+                            val rawLastMsg = conv.lastMessagePreview
                             val preview = stripThinkingProcess(rawLastMsg).take(80).replace("\n", " ").ifBlank { "No messages" }
 
                     Card(
@@ -426,7 +448,7 @@ fun HistoryScreen(
                                 )
                                 Spacer(Modifier.height(4.dp))
                                 Text(
-                                    text = "$dateFormatted · ${conv.messages.size} msgs",
+                                    text = "$dateFormatted · ${conv.messageCount} msgs",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary,
                                     fontSize = 11.sp,
@@ -437,14 +459,16 @@ fun HistoryScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(
                                     onClick = {
-                                        val md = viewModel.exportChatMarkdown(conv)
-                                        val sendIntent =
-                                            Intent().apply {
-                                                action = Intent.ACTION_SEND
-                                                putExtra(Intent.EXTRA_TEXT, md)
-                                                type = "text/plain"
-                                            }
-                                        context.startActivity(Intent.createChooser(sendIntent, "Export Conversation"))
+                                        scope.launch {
+                                            val md = viewModel.exportChatMarkdownById(conv.id)
+                                            val sendIntent =
+                                                Intent().apply {
+                                                    action = Intent.ACTION_SEND
+                                                    putExtra(Intent.EXTRA_TEXT, md)
+                                                    type = "text/plain"
+                                                }
+                                            context.startActivity(Intent.createChooser(sendIntent, "Export Conversation"))
+                                        }
                                     },
                                     modifier = Modifier.size(32.dp),
                                 ) {
@@ -521,14 +545,16 @@ fun HistoryScreen(
 
                         Button(
                             onClick = {
-                                val allText = conversations.joinToString("\n\n---\n\n") { viewModel.exportChatMarkdown(it) }
-                                val sendIntent =
-                                    Intent().apply {
-                                        action = Intent.ACTION_SEND
-                                        putExtra(Intent.EXTRA_TEXT, allText)
-                                        type = "text/plain"
-                                    }
+                                scope.launch {
+                                    val allText = viewModel.exportAllChatsMarkdown()
+                                    val sendIntent =
+                                        Intent().apply {
+                                            action = Intent.ACTION_SEND
+                                            putExtra(Intent.EXTRA_TEXT, allText)
+                                            type = "text/plain"
+                                        }
                                 context.startActivity(Intent.createChooser(sendIntent, "Export All Conversations"))
+                                }
                             },
                             enabled = conversations.isNotEmpty(),
                             shape = RoundedCornerShape(12.dp),

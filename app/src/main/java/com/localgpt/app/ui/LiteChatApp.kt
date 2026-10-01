@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Settings
@@ -69,7 +71,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,7 +80,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.localgpt.app.core.engine.LiteRtEngineManager
 import com.localgpt.app.core.server.OpenAiServer
 import com.localgpt.app.ui.about.AboutScreen
 import com.localgpt.app.ui.characters.CharactersScreen
@@ -132,7 +132,6 @@ fun LiteChatApp(
     val navController = rememberNavController()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route ?: NavRoute.CHAT
@@ -144,7 +143,6 @@ fun LiteChatApp(
     val loadedModelPath by viewModel.loadedModelPath.collectAsState()
     val activeBackend by viewModel.activeBackendState.collectAsState()
     val conversations = viewModel.conversations.value
-    val specs = remember { LiteRtEngineManager.getSystemSpecs(context) }
     val freeDiskGb = viewModel.freeDiskGb()
 
     val isServerRunning = serverStatus is OpenAiServer.Status.Running
@@ -176,6 +174,7 @@ fun LiteChatApp(
                     items = listOf(
                         DrawerMenuItem(NavRoute.LOGS, "Telemetry Logs", Icons.Filled.Terminal, Icons.Outlined.Terminal),
                         DrawerMenuItem(NavRoute.SETTINGS, "Settings", Icons.Filled.Settings, Icons.Outlined.Settings),
+                        DrawerMenuItem(NavRoute.ABOUT, "About", Icons.Filled.Info, Icons.Outlined.Info),
                     )
                 ),
             )

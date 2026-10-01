@@ -3,9 +3,9 @@ package com.localgpt.app.ui.chat
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import com.localgpt.app.data.ChatConstants
+import android.app.Activity
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -126,6 +126,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -153,8 +154,10 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 // SlashCommand, SpeechRecognizerHelper, TtsHelper extracted to separate files
@@ -185,6 +188,10 @@ fun ChatScreen(
     val activeBackend by viewModel.activeBackendState.collectAsState()
     val loadedModelPath by viewModel.loadedModelPath.collectAsState()
     val isGenerating by viewModel.isGenerating
+    // B39: hoisted derived state — topBar/bottomBar read this, and reading
+    // messages.isNotEmpty() directly there recomposed them on every ~50ms
+    // token batch.
+    val hasMessages by remember { derivedStateOf { viewModel.messages.isNotEmpty() } }
     val errorMessage by viewModel.errorMessage
     val context = LocalContext.current
 
@@ -236,6 +243,11 @@ fun ChatScreen(
         onDispose {
             speechHelper.destroy()
             ttsHelper.destroy()
+            // B40: stop an in-flight generation when leaving the chat screen,
+            // but NOT on configuration change (rotation) — the VM survives it.
+            if ((context as? Activity)?.isChangingConfigurations != true) {
+                viewModel.stopGeneration()
+            }
         }
     }
 
@@ -281,11 +293,12 @@ fun ChatScreen(
             }
         }
 
-    // Token context calculation (effective: summary + unfolded tail)
+    // Token context calculation (effective: summary + unfolded tail).
+    // P2: throttled — the full walk is O(n) over every message.
     val totalContextTokens by remember {
         derivedStateOf {
             viewModel.compressionTick.value
-            viewModel.effectiveContextTokens()
+            viewModel.effectiveContextTokensThrottled()
         }
     }
 
@@ -352,7 +365,7 @@ fun ChatScreen(
                                     ) {}
                                     Spacer(Modifier.width(5.dp))
                                     Text(
-                                        text = if (isLoadingModel) "Loading Model…" else "$modelDisplayName (${activeBackend ?: if (settings.modelSource == ChatConstants.SOURCE_REMOTE) "Remote" else "GPU"})",
+                                        text = if (isLoadingModel) "Loading Model…" else "$modelDisplayName (${activeBackend ?: if (settings.modelSource == ChatConstants.SOURCE_REMOTE) "Remote" else ChatConstants.BACKEND_GPU})",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -431,7 +444,7 @@ fun ChatScreen(
                                 DropdownMenuItem(
                                     text = { Text("Regenerate Response") },
                                     leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
-                                    enabled = viewModel.messages.isNotEmpty() && !isGenerating,
+                                    enabled = hasMessages && !isGenerating,
                                     onClick = {
                                         showOptionsMenu = false
                                         viewModel.regenerateLastResponse()
@@ -440,7 +453,7 @@ fun ChatScreen(
                                 DropdownMenuItem(
                                     text = { Text("Clear All Messages") },
                                     leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                                    enabled = viewModel.messages.isNotEmpty(),
+                                    enabled = hasMessages,
                                     onClick = {
                                         showOptionsMenu = false
                                         viewModel.clearCurrentChat()
@@ -464,7 +477,7 @@ fun ChatScreen(
                         .padding(horizontal = 10.dp, vertical = 4.dp),
             ) {
                 // Token Context indicator (Subtle 1-line status when chatting)
-                if (viewModel.messages.isNotEmpty() || input.isNotBlank()) {
+                if (hasMessages || input.isNotBlank()) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -610,20 +623,15 @@ fun ChatScreen(
 
                         // Image Thumbnail Attachment Preview
                         if (selectedImageUri != null) {
-                            val bitmap = remember(selectedImageUri) {
-                                try {
-                                    selectedImageUri?.let { uri ->
-                                        val opts = BitmapFactory.Options().apply {
-                                            inSampleSize = 2
-                                            inPreferredConfig = Bitmap.Config.RGB_565
-                                        }
-                                        context.contentResolver.openInputStream(uri)?.use { stream ->
-                                            BitmapFactory.decodeStream(stream, null, opts)
+                            // B38: decode off the main thread, downsampled for the
+                            // 44dp thumbnail (was: main-thread decode in remember).
+                            val bitmap by produceState<Bitmap?>(initialValue = null, selectedImageUri) {
+                                value =
+                                    withContext(Dispatchers.IO) {
+                                        selectedImageUri?.let { uri ->
+                                            decodeSampledBitmapFromUri(context.contentResolver, uri, reqSizePx = 192)
                                         }
                                     }
-                                } catch (_: Throwable) {
-                                    null
-                                }
                             }
                             // Recycle bitmap when URI changes or composable leaves composition
                             DisposableEffect(bitmap) {
@@ -878,7 +886,7 @@ fun ChatScreen(
                                                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                                             ) {
                                                 Text(
-                                                    text = if (settings.modelSource == ChatConstants.SOURCE_REMOTE) "Remote" else (activeBackend ?: "GPU"),
+                                                    text = if (settings.modelSource == ChatConstants.SOURCE_REMOTE) "Remote" else (activeBackend ?: ChatConstants.BACKEND_GPU),
                                                     style = MaterialTheme.typography.labelSmall,
                                                     fontSize = 10.sp,
                                                     fontWeight = FontWeight.SemiBold,
@@ -1317,7 +1325,7 @@ fun ChatScreen(
                                                 overflow = TextOverflow.Ellipsis,
                                             )
                                             Text(
-                                                text = "$dateStr · ${conv.messages.size} messages",
+                                                text = "$dateStr · ${conv.messageCount} messages",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 fontSize = 11.sp,
@@ -1729,6 +1737,8 @@ fun ChatScreen(
                         )
                         web
                     },
+                    // B37: WebViews hold native resources; destroy on dismiss.
+                    onRelease = { it.destroy() },
                     modifier = Modifier.fillMaxSize().weight(1f),
                 )
             }

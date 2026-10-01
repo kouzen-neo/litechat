@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -43,7 +44,7 @@ data class Settings(
     val maxTokens: Int = 512,
     val contextWindowTokens: Int = 2048, // 1024 | 2048 | 4096
     val promptTemplateFormat: String = "auto", // "auto" | "gemma" | "chatml" | "llama3" | "raw"
-    val backend: String = "GPU", // "GPU" | "CPU"
+    val backend: String = ChatConstants.BACKEND_GPU, // "GPU" | "CPU"
     val verboseLogs: Boolean = false,
     val perModelParamsJson: String = "{}",
     // Model source & Remote backend (Ollama / OpenAI API)
@@ -126,85 +127,178 @@ class SettingsRepository(
         private const val SEC_REMOTE_API_KEY = "remote_api_key"
         private const val SEC_HF_TOKEN = "huggingface_token"
         private const val SEC_SERVER_AUTH_TOKEN = "server_auth_token"
+
+        /** Set in the plaintext fallback prefs once the fallback has been used (B17/S5). */
+        private const val FALLBACK_USED_FLAG = "fallback_used"
+
+        private val SEC_TOKEN_KEYS = listOf(SEC_REMOTE_API_KEY, SEC_HF_TOKEN, SEC_SERVER_AUTH_TOKEN)
+    }
+
+    /**
+     * Runs a one-time migration exactly once *until it reports full success*.
+     * [block] must return true only when every step succeeded; a false return
+     * or a thrown exception leaves the tracker incomplete so a later call
+     * retries instead of silently dropping the migration (B5).
+     *
+     * Pure logic, no Android dependencies — covered by unit tests.
+     */
+    internal class MigrationTracker {
+        private val mutex = Mutex()
+
+        @Volatile
+        var completed = false
+            private set
+
+        suspend fun runIfNeeded(block: suspend () -> Boolean) {
+            if (completed) return
+            mutex.withLock {
+                if (completed) return
+                val ok =
+                    try {
+                        block()
+                    } catch (t: Throwable) {
+                        KLog.e("SettingsRepository", "Token migration failed", t)
+                        false
+                    }
+                if (ok) completed = true
+            }
+        }
     }
 
     /**
      * Encrypted storage for sensitive tokens (remote API key, Hugging Face token,
      * embedded-server bearer token). Falls back to plain SharedPreferences only if
      * the Android Keystore is unavailable, so the app keeps working on odd devices.
+     *
+     * Kept behind a volatile cache (not `by lazy`) so a later successful
+     * Keystore can replace the plaintext fallback (B17/S5).
      */
-    private val securePrefs: SharedPreferences by lazy {
+    @Volatile
+    private var securePrefsCache: SharedPreferences? = null
+    private val securePrefsInitLock = Any()
+
+    private fun securePrefs(): SharedPreferences =
+        securePrefsCache ?: synchronized(securePrefsInitLock) {
+            securePrefsCache ?: createTokenStore().also { securePrefsCache = it }
+        }
+
+    private fun fallbackPrefs(): SharedPreferences =
+        context.applicationContext.getSharedPreferences("${SECURE_PREFS_NAME}_fallback", Context.MODE_PRIVATE)
+
+    private fun createEncryptedPrefs(): SharedPreferences {
         val appContext = context.applicationContext
+        // MasterKeys (plural) is the stable API in security-crypto 1.0.0;
+        // the singular MasterKey builder only exists in 1.1.0-alpha+.
+        val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+        // NOTE: in security-crypto 1.0.0 the String-alias overload takes
+        // (fileName, masterKeyAlias, context) — NOT (context, fileName, ...).
+        return EncryptedSharedPreferences.create(
+            SECURE_PREFS_NAME,
+            masterKeyAlias,
+            appContext,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
+
+    private fun createTokenStore(): SharedPreferences =
         try {
-            // MasterKeys (plural) is the stable API in security-crypto 1.0.0;
-            // the singular MasterKey builder only exists in 1.1.0-alpha+.
-            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
-            // NOTE: in security-crypto 1.0.0 the String-alias overload takes
-            // (fileName, masterKeyAlias, context) — NOT (context, fileName, ...).
-            EncryptedSharedPreferences.create(
-                SECURE_PREFS_NAME,
-                masterKeyAlias,
-                appContext,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-            )
+            createEncryptedPrefs()
         } catch (t: Throwable) {
             KLog.w(TAG, "EncryptedSharedPreferences unavailable, using plain fallback: ${t.message}")
-            appContext.getSharedPreferences("${SECURE_PREFS_NAME}_fallback", Context.MODE_PRIVATE)
+            fallbackPrefs().edit().putBoolean(FALLBACK_USED_FLAG, true).apply()
+            fallbackPrefs()
+        }
+
+    /**
+     * If tokens are sitting in the plaintext fallback (the Keystore was broken
+     * at some point), retry the encrypted store on every start. When the
+     * Keystore works again, move the tokens over and wipe the fallback (B17/S5).
+     */
+    private val fallbackUpgradeMutex = Mutex()
+
+    private suspend fun tryUpgradeFallbackStore() {
+        val fb = fallbackPrefs()
+        if (!fb.getBoolean(FALLBACK_USED_FLAG, false)) return
+        fallbackUpgradeMutex.withLock {
+            if (!fb.getBoolean(FALLBACK_USED_FLAG, false)) return
+            val encrypted =
+                try {
+                    createEncryptedPrefs()
+                } catch (t: Throwable) {
+                    KLog.w(TAG, "Encrypted store still unavailable; keeping plaintext fallback: ${t.message}")
+                    return
+                }
+            val editor = encrypted.edit()
+            var movedAny = false
+            for (key in SEC_TOKEN_KEYS) {
+                val value = fb.getString(key, null)
+                if (!value.isNullOrEmpty()) {
+                    editor.putString(key, value)
+                    movedAny = true
+                }
+            }
+            // Synchronous commit: the fallback is wiped right after, so the
+            // copy must be durable first.
+            if (movedAny && !editor.commit()) {
+                KLog.e(TAG, "Fallback token re-migration commit failed; will retry next start")
+                return
+            }
+            fb.edit().clear().commit()
+            synchronized(securePrefsInitLock) { securePrefsCache = encrypted }
+            KLog.d(TAG, "Migrated tokens from plaintext fallback into encrypted storage")
         }
     }
 
     // Bumped every time a token is written so settingsFlow re-emits even though
     // the DataStore itself did not change.
     private val tokenBump = MutableStateFlow(0)
-    private val migrationMutex = Mutex()
-
-    @Volatile
-    private var tokensMigrated = false
+    private val tokenMigration = MigrationTracker()
 
     /**
      * One-time migration: copy any tokens still sitting in plaintext DataStore
      * into the encrypted store, then delete them from DataStore.
      */
     private suspend fun migrateTokensIfNeeded(prefs: Preferences) {
-        if (tokensMigrated) return
-        migrationMutex.withLock {
-            if (tokensMigrated) return
-            try {
-                // NOTE: use the Pair() constructor, not the `to` infix — DataStore
-                // defines its own `Key<T>.to(value)` returning Preferences.Pair,
-                // which mapOf() cannot infer K,V from.
-                val legacy: Map<Preferences.Key<String>, String> =
-                    mapOf(
-                        Pair(Keys.LEGACY_REMOTE_API_KEY, SEC_REMOTE_API_KEY),
-                        Pair(Keys.LEGACY_HF_TOKEN, SEC_HF_TOKEN),
-                        Pair(Keys.LEGACY_SERVER_AUTH_TOKEN, SEC_SERVER_AUTH_TOKEN),
-                    )
-                var movedAny = false
-                val editor = securePrefs.edit()
-                for ((oldKey, newKey) in legacy) {
-                    val value = prefs[oldKey]
-                    if (!value.isNullOrEmpty()) {
-                        editor.putString(newKey, value)
-                        movedAny = true
-                    }
+        // Opportunistically recover from the plaintext fallback first (B17/S5).
+        tryUpgradeFallbackStore()
+        tokenMigration.runIfNeeded {
+            // NOTE: use the Pair() constructor, not the `to` infix — DataStore
+            // defines its own `Key<T>.to(value)` returning Preferences.Pair,
+            // which mapOf() cannot infer K,V from.
+            val legacy: Map<Preferences.Key<String>, String> =
+                mapOf(
+                    Pair(Keys.LEGACY_REMOTE_API_KEY, SEC_REMOTE_API_KEY),
+                    Pair(Keys.LEGACY_HF_TOKEN, SEC_HF_TOKEN),
+                    Pair(Keys.LEGACY_SERVER_AUTH_TOKEN, SEC_SERVER_AUTH_TOKEN),
+                )
+            val editor = securePrefs().edit()
+            var movedAny = false
+            for ((oldKey, newKey) in legacy) {
+                val value = prefs[oldKey]
+                if (!value.isNullOrEmpty()) {
+                    editor.putString(newKey, value)
+                    movedAny = true
                 }
-                if (movedAny) {
-                    editor.apply()
-                    KLog.d(TAG, "Migrated sensitive tokens from DataStore to encrypted storage")
-                }
-                if (legacy.keys.any { prefs.contains(it) }) {
-                    context.dataStore.edit {
-                        it.remove(Keys.LEGACY_REMOTE_API_KEY)
-                        it.remove(Keys.LEGACY_HF_TOKEN)
-                        it.remove(Keys.LEGACY_SERVER_AUTH_TOKEN)
-                    }
-                }
-            } catch (t: Throwable) {
-                KLog.e(TAG, "Token migration failed", t)
-            } finally {
-                tokensMigrated = true
             }
+            // Synchronous commit (not apply()): the DataStore source keys are
+            // removed right after, so the copy must be durable first (B16).
+            // A failed commit returns false so the next start retries (B5).
+            if (movedAny && !editor.commit()) {
+                KLog.e(TAG, "Token migration commit failed; will retry next start")
+                return@runIfNeeded false
+            }
+            if (movedAny) {
+                KLog.d(TAG, "Migrated sensitive tokens from DataStore to encrypted storage")
+            }
+            if (legacy.keys.any { prefs.contains(it) }) {
+                context.dataStore.edit {
+                    it.remove(Keys.LEGACY_REMOTE_API_KEY)
+                    it.remove(Keys.LEGACY_HF_TOKEN)
+                    it.remove(Keys.LEGACY_SERVER_AUTH_TOKEN)
+                }
+            }
+            true
         }
     }
 
@@ -224,17 +318,17 @@ class SettingsRepository(
                     maxTokens = prefs[Keys.MAX_TOKENS] ?: 512,
                     contextWindowTokens = prefs[Keys.CONTEXT_WINDOW_TOKENS] ?: 2048,
                     promptTemplateFormat = prefs[Keys.PROMPT_TEMPLATE_FORMAT] ?: "auto",
-                    backend = prefs[Keys.BACKEND] ?: "GPU",
+                    backend = prefs[Keys.BACKEND] ?: ChatConstants.BACKEND_GPU,
                     verboseLogs = prefs[Keys.VERBOSE_LOGS] ?: false,
                     perModelParamsJson = prefs[Keys.PER_MODEL_PARAMS] ?: "{}",
                     modelSource = prefs[Keys.MODEL_SOURCE] ?: ChatConstants.SOURCE_LOCAL,
                     remoteBaseUrl = prefs[Keys.REMOTE_BASE_URL] ?: "http://192.168.1.100:11434",
-                    remoteApiKey = securePrefs.getString(SEC_REMOTE_API_KEY, "") ?: "",
+                    remoteApiKey = securePrefs().getString(SEC_REMOTE_API_KEY, "") ?: "",
                     remoteModelId = prefs[Keys.REMOTE_MODEL_ID] ?: "",
-                    huggingFaceToken = securePrefs.getString(SEC_HF_TOKEN, "") ?: "",
+                    huggingFaceToken = securePrefs().getString(SEC_HF_TOKEN, "") ?: "",
                     serverPort = prefs[Keys.SERVER_PORT] ?: 8080,
                     serverBindAll = prefs[Keys.SERVER_BIND_ALL] ?: false,
-                    serverAuthToken = securePrefs.getString(SEC_SERVER_AUTH_TOKEN, "") ?: "",
+                    serverAuthToken = securePrefs().getString(SEC_SERVER_AUTH_TOKEN, "") ?: "",
                     systemPrompt = prefs[Keys.SYSTEM_PROMPT] ?: DEFAULT_SYSTEM_PROMPT,
                     customPersonasJson = prefs[Keys.CUSTOM_PERSONAS] ?: "",
                     enableThinking = prefs[Keys.ENABLE_THINKING] ?: true,
@@ -257,12 +351,15 @@ class SettingsRepository(
         value: String,
     ) {
         try {
-            securePrefs.edit().putString(key, value).apply()
+            securePrefs().edit().putString(key, value).apply()
         } catch (t: Throwable) {
             KLog.e(TAG, "Failed to store token in encrypted storage", t)
+            // Don't bump: collectors must not re-read a token that was never stored (B30).
+            return
         }
         // Re-emit settingsFlow so collectors observe the new token value.
-        tokenBump.value = tokenBump.value + 1
+        // update{} is atomic; the old read-modify-write could lose increments (B30).
+        tokenBump.update { it + 1 }
     }
 
     suspend fun setCustomPersonasJson(value: String) = edit { it[Keys.CUSTOM_PERSONAS] = value }

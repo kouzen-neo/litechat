@@ -5,6 +5,8 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.localgpt.app.util.KLog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
@@ -36,6 +38,94 @@ data class Conversation(
     var summarizedUntilId: String? = null, // id of the last message folded into the summary
 )
 
+/** Lightweight conversation metadata for fast listings without parsing message bodies (P6). */
+data class ConversationHeader(
+    val id: String = "",
+    val title: String = "",
+    val createdAt: Long = 0L,
+    val updatedAt: Long = 0L,
+    val messageCount: Int = 0,
+    val lastMessagePreview: String = "",
+)
+
+private val conversationIdPattern = Regex("^[A-Za-z0-9-]+$")
+
+/** Builds the lightweight list header from a full conversation (P6). */
+internal fun Conversation.toHeader(): ConversationHeader {
+    val last = messages.lastOrNull()?.content?.trim().orEmpty()
+    val preview = if (last.length > 120) last.take(120) + "…" else last
+    return ConversationHeader(
+        id = id,
+        title = title,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+        messageCount = messages.size,
+        lastMessagePreview = preview,
+    )
+}
+
+/** True when [id] is safe to embed verbatim in a file name (B28). */
+internal fun isValidConversationId(id: String): Boolean = conversationIdPattern.matches(id)
+
+/**
+ * Striped per-id locks: concurrent writes to *different* conversations never
+ * block each other, while writes to the *same* conversation are serialized so
+ * a read-modify-write (rename) can never silently overwrite a newer save (B6).
+ */
+internal class StripedWriteLocks {
+    private val guard = Any()
+    private val locks = HashMap<String, Mutex>()
+
+    fun forId(id: String): Mutex =
+        synchronized(guard) { locks.getOrPut(id) { Mutex() } }
+}
+
+/**
+ * Tmp sibling name unique per write call. Two concurrent saves of the same
+ * conversation previously shared one "<id>.json.tmp" and could delete or
+ * overwrite each other's tmp file mid-write, corrupting the conversation (B2).
+ */
+internal fun uniqueTmpFileFor(target: File): File =
+    File(target.parentFile, "${target.name}.${System.nanoTime()}.tmp")
+
+private const val STALE_TMP_AGE_MS = 60_000L
+
+/**
+ * Writes [text] to [file] atomically: content goes to a uniquely-named temp
+ * sibling file first, then is renamed over the target. A crash mid-write can
+ * never leave a half-written conversation file behind.
+ *
+ * @return true on success, false on failure (also logged via KLog).
+ */
+internal fun writeAtomically(
+    file: File,
+    text: String,
+): Boolean =
+    try {
+        // Best-effort cleanup of stale tmp siblings left behind by crashed
+        // writes. Only files older than STALE_TMP_AGE_MS are removed, so a
+        // concurrent writer's fresh tmp file is never touched.
+        file.parentFile?.listFiles { f ->
+            f.isFile &&
+                f.name.startsWith("${file.name}.") &&
+                f.name.endsWith(".tmp") &&
+                System.currentTimeMillis() - f.lastModified() > STALE_TMP_AGE_MS
+        }?.forEach { it.delete() }
+        val tmp = uniqueTmpFileFor(file)
+        tmp.writeText(text)
+        if (tmp.renameTo(file)) {
+            true
+        } else {
+            // renameTo can fail across filesystems; fall back to copy+delete.
+            tmp.copyTo(file, overwrite = true)
+            tmp.delete()
+            true
+        }
+    } catch (e: Exception) {
+        KLog.e("ChatRepository", "Atomic write failed for ${file.name}", e)
+        false
+    }
+
 /**
  * File-based conversation persistence: one JSON file per conversation under
  * filesDir/chats/. Asynchronous file I/O on Dispatchers.IO.
@@ -47,55 +137,120 @@ class ChatRepository(
     private val dir: File =
         File(context.filesDir, "chats").apply { if (!exists()) mkdirs() }
 
-    private fun fileFor(id: String) = File(dir, "$id.json")
+    /** Serializes all writes (save/rename/delete) per conversation id (B2/B6). */
+    private val writeLocks = StripedWriteLocks()
+
+    /** Guards the lightweight conversation index (P6). */
+    private val indexMutex = Mutex()
+    private fun indexFile() = File(dir, "index.json")
+
+    private fun fileFor(id: String): File {
+        // Conversation ids are embedded verbatim in file names; reject anything
+        // outside the safe alphabet instead of risking path traversal (B28).
+        require(isValidConversationId(id)) { "Invalid conversation id: $id" }
+        return File(dir, "$id.json")
+    }
 
     /**
-     * Writes [text] to [file] atomically: content goes to a temp sibling file
-     * first, then is renamed over the target. A crash mid-write can never leave
-     * a half-written conversation file behind.
-     *
-     * @return true on success, false on failure (also logged via KLog).
+     * Conversation files only. The index file and tmp leftovers must never be
+     * treated as conversations.
      */
-    private fun writeAtomically(
-        file: File,
-        text: String,
-    ): Boolean =
-        try {
-            val tmp = File(file.parentFile, "${file.name}.tmp")
-            if (tmp.exists()) tmp.delete()
-            tmp.writeText(text)
-            if (tmp.renameTo(file)) {
-                true
-            } else {
-                // renameTo can fail across filesystems; fall back to copy+delete.
-                tmp.copyTo(file, overwrite = true)
-                tmp.delete()
-                true
-            }
-        } catch (e: Exception) {
-            KLog.e("ChatRepository", "Atomic write failed for ${file.name}", e)
-            false
-        }
+    private fun conversationFiles(): List<File> =
+        dir.listFiles { f ->
+            f.isFile && f.name.endsWith(".json") && f.name != "index.json" && !f.name.endsWith(".tmp")
+        }?.toList() ?: emptyList()
 
     suspend fun listConversations(): List<Conversation> =
         withContext(Dispatchers.IO) {
             try {
-                dir
-                    .listFiles { f -> f.isFile && f.name.endsWith(".json") }
-                    ?.mapNotNull { f ->
+                conversationFiles()
+                    .mapNotNull { f ->
                         try {
                             normalize(gson.fromJson(f.readText(), object : TypeToken<Conversation>() {}.type))
                         } catch (e: Exception) {
                             KLog.w("ChatRepository", "Skipping unreadable conversation file ${f.name}: ${e.message}")
                             null
                         }
-                    }?.sortedByDescending { it.updatedAt }
-                    ?: emptyList()
+                    }.sortedByDescending { it.updatedAt }
             } catch (e: Exception) {
                 KLog.e("ChatRepository", "Failed to list conversations", e)
                 emptyList()
             }
         }
+
+    /**
+     * Lightweight listing (P6): returns only id/title/timestamps by reading the
+     * small index file instead of fully parsing every conversation JSON.
+     *
+     * The index is maintained on every save/rename/delete; files without an
+     * index entry (legacy installs, crashes) are parsed once and folded in.
+     *
+     * NOTE: the history search UI and the JSON export need full message bodies,
+     * so [listConversations] keeps its full-parse behavior. Moving the startup
+     * path to this API requires UI changes outside this file.
+     */
+    suspend fun listConversationHeaders(): List<ConversationHeader> =
+        withContext(Dispatchers.IO) {
+            indexMutex.withLock {
+                val filesById = conversationFiles().associateBy { it.name.removeSuffix(".json") }
+                val previous = readIndex().associateBy { it.id }
+                val merged = ArrayList<ConversationHeader>(filesById.size)
+                var changed = false
+                for ((id, file) in filesById) {
+                    val known = previous[id]
+                    if (known != null) {
+                        merged.add(known)
+                    } else {
+                        try {
+                            // Parse as full Conversation so messageCount/preview stay correct
+                            // even for files predating the index (Gson ignores unknown fields
+                            // when parsing as header, which would zero the new fields).
+                            val full = gson.fromJson(file.readText(), Conversation::class.java)
+                            merged.add(full.toHeader().copy(id = id))
+                            changed = true
+                        } catch (e: Exception) {
+                            KLog.w("ChatRepository", "Skipping unreadable conversation file ${file.name}: ${e.message}")
+                        }
+                    }
+                }
+                if (changed || merged.size != previous.size) writeIndex(merged)
+                merged.sortedByDescending { it.updatedAt }
+            }
+        }
+
+    private fun readIndex(): List<ConversationHeader> =
+        try {
+            val f = indexFile()
+            if (f.exists()) {
+                gson.fromJson(f.readText(), object : TypeToken<List<ConversationHeader>>() {}.type)
+                    ?: emptyList()
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            KLog.w("ChatRepository", "Failed to read conversation index: ${e.message}")
+            emptyList()
+        }
+
+    private fun writeIndex(entries: List<ConversationHeader>) {
+        if (!writeAtomically(indexFile(), gson.toJson(entries))) {
+            KLog.e("ChatRepository", "Failed to persist conversation index")
+        }
+    }
+
+    /** Must be called with [indexMutex] held. */
+    private fun updateIndexEntry(conv: Conversation) {
+        val entries = readIndex().toMutableList()
+        val header = conv.toHeader()
+        val i = entries.indexOfFirst { it.id == conv.id }
+        if (i >= 0) entries[i] = header else entries.add(header)
+        writeIndex(entries)
+    }
+
+    /** Must be called with [indexMutex] held. */
+    private fun removeIndexEntry(id: String) {
+        writeIndex(readIndex().filterNot { it.id == id })
+    }
 
     suspend fun get(id: String): Conversation? =
         withContext(Dispatchers.IO) {
@@ -114,29 +269,56 @@ class ChatRepository(
 
     suspend fun save(conversation: Conversation): Conversation =
         withContext(Dispatchers.IO) {
-            conversation.updatedAt = System.currentTimeMillis()
-            if (conversation.title.isBlank()) {
-                conversation.title =
-                    conversation.messages.firstOrNull { it.role == ChatConstants.ROLE_USER }
-                        ?.content?.take(48)?.replace("\n", " ") ?: "New Chat"
+            // All writes for one conversation id are serialized: concurrent
+            // save() calls (e.g. summary compression racing a normal persist)
+            // previously interleaved through a single shared tmp file (B2),
+            // and rename()'s read-modify-write could clobber a newer save (B6).
+            writeLocks.forId(conversation.id).withLock {
+                conversation.updatedAt = System.currentTimeMillis()
+                if (conversation.title.isBlank()) {
+                    conversation.title =
+                        conversation.messages.firstOrNull { it.role == ChatConstants.ROLE_USER }
+                            ?.content?.take(48)?.replace("\n", " ") ?: "New Chat"
+                }
+                if (writeAtomically(fileFor(conversation.id), gson.toJson(conversation))) {
+                    indexMutex.withLock { updateIndexEntry(conversation) }
+                } else {
+                    KLog.e("ChatRepository", "save() failed for conversation ${conversation.id}")
+                }
+                conversation
             }
-            if (!writeAtomically(fileFor(conversation.id), gson.toJson(conversation))) {
-                KLog.e("ChatRepository", "save() failed for conversation ${conversation.id}")
-            }
-            conversation
         }
 
     suspend fun rename(id: String, newTitle: String): Boolean =
         withContext(Dispatchers.IO) {
-            val conv = get(id) ?: return@withContext false
-            conv.title = newTitle.trim().ifBlank { "Untitled Chat" }
-            conv.updatedAt = System.currentTimeMillis()
-            writeAtomically(fileFor(conv.id), gson.toJson(conv))
+            writeLocks.forId(id).withLock {
+                val conv = get(id) ?: return@withLock false
+                conv.title = newTitle.trim().ifBlank { "Untitled Chat" }
+                conv.updatedAt = System.currentTimeMillis()
+                val ok = writeAtomically(fileFor(conv.id), gson.toJson(conv))
+                if (ok) {
+                    indexMutex.withLock { updateIndexEntry(conv) }
+                }
+                ok
+            }
         }
 
     suspend fun delete(id: String): Boolean =
         withContext(Dispatchers.IO) {
-            fileFor(id).let { it.exists() && it.delete() }
+            writeLocks.forId(id).withLock {
+                val target = fileFor(id)
+                val deleted = target.exists() && target.delete()
+                if (deleted) {
+                    // Drop tmp siblings left by crashed writes while we hold
+                    // the per-id lock, so no concurrent writer is active.
+                    target.parentFile
+                        ?.listFiles { f ->
+                            f.isFile && f.name.startsWith("${target.name}.") && f.name.endsWith(".tmp")
+                        }?.forEach { it.delete() }
+                    indexMutex.withLock { removeIndexEntry(id) }
+                }
+                deleted
+            }
         }
 
     /** Whether the conversation already has a file on disk. */
@@ -145,9 +327,18 @@ class ChatRepository(
 
     suspend fun deleteAll(): Int =
         withContext(Dispatchers.IO) {
-            var n = 0
-            dir.listFiles()?.forEach { if (it.name.endsWith(".json") && it.delete()) n++ }
-            n
+            // indexMutex only (never an id lock): save()/rename()/delete() take
+            // id lock -> index lock, so this order can never deadlock.
+            indexMutex.withLock {
+                var n = 0
+                dir.listFiles()?.forEach { f ->
+                    if (!f.isFile || f.name == "index.json") return@forEach
+                    if (f.name.endsWith(".json") && f.delete()) n++
+                    else if (f.name.endsWith(".tmp")) f.delete() // crash leftovers, not counted
+                }
+                writeIndex(emptyList())
+                n
+            }
         }
 
     /**

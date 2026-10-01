@@ -1,8 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Allow cleartext HTTP:
-    - loopback (127.0.0.1) traffic between apps on the same device
-    - LAN mode (0.0.0.0) so other devices can reach the /v1 endpoint over plain HTTP
+    This config applies ONLY to OUTGOING (client) connections made by the app.
+    It does NOT affect the inbound Ktor server socket (LAN mode / 0.0.0.0),
+    which is a plain server socket independent of this policy.
+
+    Cleartext HTTP is permitted because the Remote AI feature targets
+    user-configured LAN endpoints such as http://192.168.1.100:11434 (Ollama),
+    which typically serve plain HTTP. Blocking cleartext would break that core
+    feature: Android matches <domain> entries literally (no CIDR/wildcard
+    support for IP ranges), so there is no way to allowlist "all private LAN
+    IPs" while blocking the public internet.
+
+    Privacy note: the Remote API key (Authorization: Bearer) is only ever sent
+    to the user-configured base URL. If you are concerned about passive
+    eavesdropping on your LAN, put the remote server behind HTTPS
+    (reverse proxy) and use an https:// base URL instead.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true" />

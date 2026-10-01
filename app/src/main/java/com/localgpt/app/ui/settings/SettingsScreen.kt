@@ -50,6 +50,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +66,7 @@ import com.localgpt.app.ui.component.Material3SettingsGroup
 import com.localgpt.app.ui.component.Material3SettingsItem
 import com.localgpt.app.ui.component.SettingsIcon
 import com.localgpt.app.ui.component.createM3Item
+import kotlinx.coroutines.launch
 
 /**
  * Dedicated App Settings Screen adhering to kzkt Material 3 Expressive design.
@@ -77,6 +79,7 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val settings by viewModel.settings.collectAsState()
+    val scope = rememberCoroutineScope()
 
     var showClearHistoryDialog by remember { mutableStateOf(false) }
 
@@ -273,14 +276,16 @@ fun SettingsScreen(
                                     )
                                 },
                                 onClick = {
-                                    val json = viewModel.exportAllConversationsJson()
-                                    val sendIntent =
-                                        Intent().apply {
-                                            action = Intent.ACTION_SEND
-                                            putExtra(Intent.EXTRA_TEXT, json)
-                                            type = "application/json"
-                                        }
-                                    context.startActivity(Intent.createChooser(sendIntent, "Export All Chats"))
+                                    scope.launch {
+                                        val json = viewModel.exportAllConversationsJson()
+                                        val sendIntent =
+                                            Intent().apply {
+                                                action = Intent.ACTION_SEND
+                                                putExtra(Intent.EXTRA_TEXT, json)
+                                                type = "application/json"
+                                            }
+                                        context.startActivity(Intent.createChooser(sendIntent, "Export All Chats"))
+                                    }
                                 },
                             ),
                             createM3Item(
