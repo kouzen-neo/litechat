@@ -381,14 +381,11 @@ fun ChatScreen(
             ) {
                 TopAppBar(
                     title = {
-                        // ChatterUI-style Center Header: Character Avatar + Name + Subtitle.
-                        // Tapping opens the model quick-switcher (moved here from the composer
-                        // so the composer stays slim).
-                        Box {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.clickable { showModelDropdown = true },
-                            ) {
+                        // ChatterUI-style Center Header: Character Avatar + Name + Subtitle
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable { onNavigateToModels() },
+                        ) {
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
@@ -431,21 +428,7 @@ fun ChatScreen(
                                     )
                                 }
                             }
-                            Icon(
-                                imageVector = Icons.Default.KeyboardArrowDown,
-                                contentDescription = "Switch model",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp).padding(start = 2.dp),
-                            )
                         }
-                        ModelQuickSwitchMenu(
-                            expanded = showModelDropdown,
-                            onDismiss = { showModelDropdown = false },
-                            viewModel = viewModel,
-                            onNavigateToModels = onNavigateToModels,
-                            onCompareClick = { showCompareDialog = true },
-                        )
-                    }
                     },
                     navigationIcon = {
                         IconButton(onClick = onOpenDrawer) {
@@ -1005,6 +988,50 @@ fun ChatScreen(
                                             },
                                         )
                                     }
+                                }
+
+                                // 2. Model Selector Pill with Floating Dropup Menu
+                                Box {
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            if (showModelDropdown) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                                        ),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .clickable { showModelDropdown = true },
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        ) {
+                                            Text(
+                                                text = modelDisplayName.take(16) + if (modelDisplayName.length > 16) "…" else "",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                            )
+                                            Spacer(Modifier.width(3.dp))
+                                            Icon(
+                                                imageVector = if (showModelDropdown) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                                                contentDescription = "Select Model",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(13.dp),
+                                            )
+                                        }
+                                    }
+
+                                    ModelQuickSwitchMenu(
+                                        expanded = showModelDropdown,
+                                        onDismiss = { showModelDropdown = false },
+                                        viewModel = viewModel,
+                                        onNavigateToModels = onNavigateToModels,
+                                        onCompareClick = { showCompareDialog = true },
+                                    )
                                 }
 
                                 // 3. Quick AI Skills Pill (when active)

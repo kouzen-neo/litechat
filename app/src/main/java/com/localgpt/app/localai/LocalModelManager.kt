@@ -37,6 +37,16 @@ class LocalModelManager(
         val ALLOWED_MODEL_EXTENSIONS = setOf("litertlm", "task", "bin", "tflite")
 
         /**
+         * True for LiteRT runtime compiler caches (MLDrift program cache,
+         * vision-encoder cache). These are derived artifacts regenerated on
+         * load — never user-selectable models.
+         */
+        fun isCompilerCacheFile(fileName: String): Boolean {
+            val lower = fileName.lowercase()
+            return "mldrift" in lower || "vision_encoder" in lower
+        }
+
+        /**
          * Sanitizes a user-supplied file name so it can never escape [modelsDir]
          * (path traversal) and always carries an allowed model extension.
          *
@@ -108,6 +118,10 @@ class LocalModelManager(
      * Scans the models directory and returns all downloaded model files
      * (.litertlm, .task, .bin, .tflite).
      * Automatically maps recognized filenames to PresetModels if available.
+     *
+     * Runtime-generated compiler caches (e.g. "*_mldrift_program_cache.bin",
+     * "*.vision_encoder_*") are excluded: they are derived artifacts, not
+     * loadable models, and only clutter the list.
      */
     fun getInstalledModels(): List<InstalledModel> =
         try {
@@ -115,6 +129,7 @@ class LocalModelManager(
                 modelsDir.listFiles { f ->
                     f.isFile &&
                         !f.name.endsWith(".tmp", ignoreCase = true) &&
+                        !isCompilerCacheFile(f.name) &&
                         f.length() > 0 &&
                         f.name.substringAfterLast('.', "").lowercase() in ALLOWED_MODEL_EXTENSIONS
                 } ?: emptyArray()
