@@ -2485,18 +2485,27 @@ class ChatViewModel(
         val s = settings.value
         val modelPath = ChatServerService.resolveModelPath(app, s) ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            engine.load(
-                LiteRtEngineManager.EngineParams(
-                    modelPath = modelPath,
-                    temperature = s.temperature,
-                    topK = s.topK,
-                    topP = s.topP,
-                    maxTokens = s.maxTokens,
-                    contextWindow = s.contextWindowTokens,
-                    backend = s.backend,
-                    systemPrompt = s.systemPrompt,
-                ),
-            )
+            try {
+                engine.load(
+                    LiteRtEngineManager.EngineParams(
+                        modelPath = modelPath,
+                        temperature = s.temperature,
+                        topK = s.topK,
+                        topP = s.topP,
+                        maxTokens = s.maxTokens,
+                        contextWindow = s.contextWindowTokens,
+                        backend = s.backend,
+                        systemPrompt = s.systemPrompt,
+                    ),
+                )
+            } catch (e: Exception) {
+                // Jangan biarkan exception tak tertangkap membunuh proses (force close),
+                // mis. file model tidak ada. Tampilkan sebagai pesan error biasa.
+                KLog.e("ChatViewModel", "loadActiveModel failed", e)
+                withContext(Dispatchers.Main) {
+                    errorMessage.value = "Gagal memuat model: ${e.message}"
+                }
+            }
         }
     }
 

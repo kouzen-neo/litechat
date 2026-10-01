@@ -23,6 +23,14 @@
 -keep class com.localgpt.app.reminder.ReminderWorker {
     public <init>(android.content.Context, androidx.work.WorkerParameters);
 }
+# WorkManager: WorkDatabase_Impl diinstansiasi via reflection oleh Room saat
+# WorkManagerInitializer berjalan di ContentProvider (SEBELUM Application.onCreate).
+# R8 full mode men-strip konstruktornya -> "Unable to get provider
+# androidx.startup.InitializationProvider" -> force close instan tanpa UI dan
+# tanpa sempat menulis crash report. (Bug ditemukan 2026-10-01)
+-keep class androidx.work.impl.WorkDatabase_Impl { <init>(); *; }
+-keep class * extends androidx.room.RoomDatabase { <init>(); *; }
+-keep class androidx.work.impl.** { *; }
 
 -keepattributes Signature
 -keepattributes *Annotation*
