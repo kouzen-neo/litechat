@@ -13,7 +13,7 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.header
-import io.ktor.server.request.origin
+import io.ktor.server.plugins.origin
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respondText
 import io.ktor.server.response.respondTextWriter

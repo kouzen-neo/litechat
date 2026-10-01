@@ -139,10 +139,12 @@ class SettingsRepository(
             // MasterKeys (plural) is the stable API in security-crypto 1.0.0;
             // the singular MasterKey builder only exists in 1.1.0-alpha+.
             val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+            // NOTE: in security-crypto 1.0.0 the String-alias overload takes
+            // (fileName, masterKeyAlias, context) — NOT (context, fileName, ...).
             EncryptedSharedPreferences.create(
-                appContext,
                 SECURE_PREFS_NAME,
                 masterKeyAlias,
+                appContext,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )
@@ -169,11 +171,14 @@ class SettingsRepository(
         migrationMutex.withLock {
             if (tokensMigrated) return
             try {
-                val legacy =
+                // NOTE: use the Pair() constructor, not the `to` infix — DataStore
+                // defines its own `Key<T>.to(value)` returning Preferences.Pair,
+                // which mapOf() cannot infer K,V from.
+                val legacy: Map<Preferences.Key<String>, String> =
                     mapOf(
-                        Keys.LEGACY_REMOTE_API_KEY to SEC_REMOTE_API_KEY,
-                        Keys.LEGACY_HF_TOKEN to SEC_HF_TOKEN,
-                        Keys.LEGACY_SERVER_AUTH_TOKEN to SEC_SERVER_AUTH_TOKEN,
+                        Pair(Keys.LEGACY_REMOTE_API_KEY, SEC_REMOTE_API_KEY),
+                        Pair(Keys.LEGACY_HF_TOKEN, SEC_HF_TOKEN),
+                        Pair(Keys.LEGACY_SERVER_AUTH_TOKEN, SEC_SERVER_AUTH_TOKEN),
                     )
                 var movedAny = false
                 val editor = securePrefs.edit()
