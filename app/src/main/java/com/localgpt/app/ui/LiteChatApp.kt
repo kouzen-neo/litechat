@@ -103,6 +103,7 @@ object NavRoute {
     const val SKILLS = "skills"
     const val SAMPLER = "sampler"
     const val MODELS = "models"
+    const val SERVER = "server"
     const val LOGS = "logs"
     const val HISTORY = "history"
     const val MCP = "mcp"
@@ -164,6 +165,7 @@ fun LiteChatApp(
                     title = "AI ENGINE & TOOLS",
                     items = listOf(
                         DrawerMenuItem(NavRoute.MODELS, if (isLocalMode) "Models Hub" else "API", Icons.Filled.Memory, Icons.Outlined.Memory),
+                        DrawerMenuItem(NavRoute.SERVER, "Server", Icons.Filled.Dns, Icons.Outlined.Dns),
                         // "Generation Parameters" + "Formatting" merged into one Chat Settings
                         // screen (SamplerScreen already hosts both tabs).
                         DrawerMenuItem(NavRoute.SAMPLER, "Chat Settings", Icons.Filled.Tune, Icons.Outlined.Tune),
@@ -408,9 +410,8 @@ fun LiteChatApp(
                                     },
                                     badge = {
                                         when (item.route) {
-                                            // Server status dot now lives on Models Hub / API,
-                                            // which hosts the Server & Benchmark section.
-                                            NavRoute.MODELS -> {
+                                            // Server status dot lives on the Server drawer item.
+                                            NavRoute.SERVER -> {
                                                 if (isServerRunning) {
                                                     Surface(
                                                         color = MaterialTheme.colorScheme.success,
@@ -559,6 +560,12 @@ fun LiteChatApp(
                         viewModel = viewModel,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(NavRoute.SERVER) {
+                    com.localgpt.app.ui.server.ServerScreen(
+                        viewModel = viewModel,
+                        onOpenDrawer = { scope.launch { drawerState.open() } },
                     )
                 }
                 composable(NavRoute.LOGS) {
