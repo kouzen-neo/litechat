@@ -88,56 +88,6 @@ class SkillsManager private constructor(private val context: Context) {
                 isEnabled = false,
                 isBuiltIn = true,
             ),
-            Skill(
-                id = "builtin_web_search_id",
-                name = "Web Search (Indonesia)",
-                description = "Live real-time search for Indonesian news, media, sports, and Wikipedia ID.",
-                category = "Research",
-                iconCategory = "search",
-                instructions = """
-You are an expert Indonesian Web Researcher with real-time Indonesian internet access.
-[AVAILABLE TOOLS]
-- `web_search_id(query: string)`: Searches Indonesian news, live events, sports scores, weather, and Wikipedia Indonesia.
-
-HOW TO CALL TOOLS:
-1. IMPORTANT (PRONOUN RESOLUTION): If the user refers to pronouns like "dia", "beliau", "ia", "itu", or follow-up questions, you MUST replace the pronoun with the actual entity or subject name from conversation history (e.g. search "when did [Entity/Person Name] win the match" instead of "when did he win").
-2. Construct concise, self-contained search queries with key event terms.
-
-Output the tool call in this exact format:
-<tool_call>
-{"name": "web_search_id", "arguments": {"query": "specific search query"}}
-</tool_call>
-
-Once search results are provided in the context, synthesize the facts directly in the requested language and cite source URLs clearly using references [1], [2].
-                """.trimIndent(),
-                isEnabled = true,
-                isBuiltIn = true,
-            ),
-            Skill(
-                id = "builtin_web_search_en",
-                name = "Web Search (Global / English)",
-                description = "Live real-time search for global news, tech documentation, international events, and Wikipedia EN.",
-                category = "Research",
-                iconCategory = "search",
-                instructions = """
-You are an expert Global Web Researcher with real-time global internet access.
-[AVAILABLE TOOLS]
-- `web_search_en(query: string)`: Searches global English news, tech documentation, international sports, and Wikipedia EN.
-
-HOW TO CALL TOOLS:
-1. IMPORTANT (PRONOUN RESOLUTION): If the user refers to "he", "she", "they", "it", or asks follow-up questions, you MUST replace the pronoun with the actual entity or subject name from conversation history (e.g. search "when did [Entity/Person Name] win the championship" instead of "when did he win").
-2. Construct detailed, self-contained search queries in English.
-
-Output the tool call in this exact format:
-<tool_call>
-{"name": "web_search_en", "arguments": {"query": "detailed search query in english"}}
-</tool_call>
-
-Once search results are provided in the context, synthesize the facts directly in English and cite source URLs clearly using references [1], [2].
-                """.trimIndent(),
-                isEnabled = false,
-                isBuiltIn = true,
-            ),
         )
     }
 
@@ -186,7 +136,24 @@ Once search results are provided in the context, synthesize the facts directly i
             }
         }
 
-        _skills.value = builtinWithToggles + customList
+        // One-time migration: custom skills used to default to enabled at
+        // creation; they now default to off and previously-created ones are
+        // switched off once (user can re-enable them manually).
+        val migrationMarker = File(dir, ".custom_skills_default_off")
+        val effectiveCustom =
+            if (migrationMarker.exists()) {
+                customList
+            } else {
+                try {
+                    migrationMarker.createNewFile()
+                } catch (_: Exception) {
+                }
+                val disabled = customList.map { if (it.isEnabled) it.copy(isEnabled = false) else it }
+                if (disabled != customList) persistCustom(disabled)
+                disabled
+            }
+
+        _skills.value = builtinWithToggles + effectiveCustom
     }
 
     private fun persistCustom(customSkills: List<Skill>) {

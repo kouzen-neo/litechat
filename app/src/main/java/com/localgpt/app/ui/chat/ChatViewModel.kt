@@ -131,6 +131,17 @@ data class BenchmarkResult(
     val timestamp: Long = System.currentTimeMillis(),
 )
 
+/**
+ * Search-trigger keywords matched on word boundaries. Precompiled once:
+ * contains() on substrings used to fire web searches for ordinary words
+ * ("hasilnya", "dijadwalkan", "mencari").
+ */
+private val WEB_SEARCH_KEYWORD_REGEX =
+    Regex(
+        "\\b(terbaru|terkini|berita|skor|hasil|jadwal|harga|cuaca|cari|search|latest|news|today|score|weather)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+
 class ChatViewModel(
     appContext: Application,
 ) : AndroidViewModel(appContext) {
@@ -457,21 +468,9 @@ class ChatViewModel(
         val allSources = (ctx?.second ?: emptyList()).toMutableList()
         val isExplicitSearch = query.startsWith("/search", ignoreCase = true) || query.startsWith("/web", ignoreCase = true)
         val isWebSkillActive = skills.value.any { it.isEnabled && (it.id == "builtin_web_researcher" || it.iconCategory.equals("search", ignoreCase = true) || it.category.equals("Research", ignoreCase = true)) }
-        val hasSearchKeyword = query.contains("terbaru", ignoreCase = true) ||
-                query.contains("terkini", ignoreCase = true) ||
-                query.contains("berita", ignoreCase = true) ||
-                query.contains("skor", ignoreCase = true) ||
-                query.contains("hasil", ignoreCase = true) ||
-                query.contains("jadwal", ignoreCase = true) ||
-                query.contains("harga", ignoreCase = true) ||
-                query.contains("cuaca", ignoreCase = true) ||
-                query.contains("search", ignoreCase = true) ||
-                query.contains("cari", ignoreCase = true) ||
-                query.contains("latest", ignoreCase = true) ||
-                query.contains("news", ignoreCase = true) ||
-                query.contains("today", ignoreCase = true) ||
-                query.contains("score", ignoreCase = true) ||
-                query.contains("weather", ignoreCase = true)
+        // Word boundaries: plain contains() false-positives on words like
+        // "hasilnya", "dijadwalkan", or "mencari".
+        val hasSearchKeyword = WEB_SEARCH_KEYWORD_REGEX.containsMatchIn(query)
 
         val shouldSearch = settings.value.enableWebSearch || isWebSkillActive || isExplicitSearch || hasSearchKeyword
 

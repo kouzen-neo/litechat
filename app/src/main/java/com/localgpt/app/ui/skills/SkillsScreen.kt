@@ -509,7 +509,7 @@ fun SkillsScreen(
                         category = category,
                         iconCategory = icon,
                         instructions = instructions,
-                        isEnabled = target?.isEnabled ?: true,
+                        isEnabled = target?.isEnabled ?: false,
                         isBuiltIn = target?.isBuiltIn ?: false,
                     )
                     SkillsManager.getInstance(context).saveSkill(newSkill)

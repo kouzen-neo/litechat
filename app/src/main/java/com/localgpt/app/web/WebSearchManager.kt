@@ -99,18 +99,19 @@ class WebSearchManager private constructor(private val context: Context) {
                 val wikiDeferred = async(Dispatchers.IO) {
                     runCatching { searchWikipedia(cleanQuery, searchLang, 2) }.getOrDefault(emptyList())
                 }
+                val ddgDeferred = async(Dispatchers.IO) {
+                    runCatching { searchDuckDuckGoLite(cleanQuery, searchLang, 3) }.getOrDefault(emptyList())
+                }
 
                 val gNews = gNewsDeferred.await()
                 val wiki = wikiDeferred.await()
+                val ddg = ddgDeferred.await()
 
+                // Wikipedia + News first (highest signal), then general web
+                // results so non-news queries are covered too.
                 combinedItems.addAll(wiki.take(2))
-                combinedItems.addAll(gNews.take(3))
-
-                // Fallback to DuckDuckGo Lite if primary sources are empty
-                if (combinedItems.isEmpty()) {
-                    val ddg = runCatching { searchDuckDuckGoLite(cleanQuery, searchLang, 2) }.getOrDefault(emptyList())
-                    combinedItems.addAll(ddg)
-                }
+                combinedItems.addAll(gNews.take(2))
+                combinedItems.addAll(ddg.take(2))
 
                 // Cross-language fallback
                 if (combinedItems.isEmpty()) {
@@ -222,36 +223,38 @@ class WebSearchManager private constructor(private val context: Context) {
             Pattern.CASE_INSENSITIVE,
         )
 
+        // Collect link hits with their positions, then pair each link with
+        // the snippet that follows it (before the next result). The old code
+        // paired two independently collected lists by index, silently dropping
+        // or mismatching results whenever the counts differed.
+        class LinkHit(val url: String, val title: String, val start: Int, val end: Int)
+        val hits = mutableListOf<LinkHit>()
         val linkMatcher = linkPattern.matcher(html)
-        val links = mutableListOf<Pair<String, String>>()
-        while (linkMatcher.find() && links.size < maxResults) {
+        while (linkMatcher.find() && hits.size < maxResults) {
             val url = linkMatcher.group(1) ?: linkMatcher.group(3) ?: ""
             val rawTitle = linkMatcher.group(2) ?: linkMatcher.group(4) ?: ""
             val title = stripHtml(rawTitle).trim()
             if (url.startsWith("http") && title.isNotBlank()) {
-                links.add(Pair(url, title))
-            }
-        }
-
-        val snippetMatcher = snippetPattern.matcher(html)
-        val snippets = mutableListOf<String>()
-        while (snippetMatcher.find() && snippets.size < maxResults) {
-            val rawSnippet = snippetMatcher.group(1).orEmpty()
-            val snippet = stripHtml(rawSnippet).trim()
-            if (snippet.isNotBlank()) {
-                snippets.add(snippet)
+                hits.add(LinkHit(url, title, linkMatcher.start(), linkMatcher.end()))
             }
         }
 
         val results = mutableListOf<WebSearchItem>()
-        for (i in 0 until minOf(links.size, snippets.size)) {
-            val (url, title) = links[i]
-            val snippet = snippets[i]
+        for ((i, hit) in hits.withIndex()) {
+            val regionEnd = if (i + 1 < hits.size) hits[i + 1].start else html.length
+            val snippetMatcher = snippetPattern.matcher(html)
+            snippetMatcher.region(hit.end, regionEnd)
+            val snippet = if (snippetMatcher.find()) {
+                stripHtml(snippetMatcher.group(1).orEmpty()).trim()
+            } else {
+                ""
+            }
             results.add(
                 WebSearchItem(
-                    title = title,
-                    snippet = snippet.take(450),
-                    url = url,
+                    title = hit.title,
+                    // Keep the result even when the page omits a snippet.
+                    snippet = snippet.ifBlank { hit.title }.take(450),
+                    url = hit.url,
                 )
             )
         }
