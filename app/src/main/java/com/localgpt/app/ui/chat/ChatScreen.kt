@@ -184,6 +184,23 @@ import java.io.File
 // Composables extracted to ChatComponents.kt
 
 /**
+ * Short, truncation-friendly model label for compact UI spots (top bar subtitle, chips).
+ * Strips provider prefixes ("provider/model"), paths, and file extensions so the
+ * remaining name fits on one line instead of being cut mid-word.
+ */
+internal fun shortModelLabel(id: String): String =
+    id.substringAfterLast('/')
+        .substringAfterLast('\\')
+        .removePrefix("custom:")
+        .removeSuffix(".litertlm")
+        .removeSuffix(".task")
+        .removeSuffix(".bin")
+        .replace("_", " ")
+        .replace("-", " ")
+        .trim()
+        .ifBlank { id }
+
+/**
  * ChatterUI-inspired Full Modern Chat Interface for LiteChat.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -343,28 +360,15 @@ fun ChatScreen(
     val modelDisplayName = remember(settings.modelSource, settings.activeModelId, settings.customModelPath, settings.remoteModelId, loadedModelPath, modelPin) {
         val pin = modelPin
         if (pin != null) {
-            val (src, id) = pin
-            val label =
-                if (src == ChatConstants.SOURCE_REMOTE) {
-                    "Remote: $id"
-                } else {
-                    id.removePrefix("custom:").substringAfterLast('/').substringAfterLast('\\')
-                        .removeSuffix(".litertlm").removeSuffix(".task").removeSuffix(".bin")
-                        .replace("_", " ").replace("-", " ")
-                }
-            "📌 $label"
+            val (_, id) = pin
+            "📌 " + shortModelLabel(id)
         } else if (settings.modelSource == ChatConstants.SOURCE_REMOTE) {
-            "Remote: " + (settings.remoteModelId.ifBlank { "Ollama (LAN)" })
+            shortModelLabel(settings.remoteModelId.ifBlank { "Ollama (LAN)" })
         } else {
             val fileName = loadedModelPath?.let { File(it).name }
                 ?: settings.customModelPath.ifBlank { null }?.let { File(it).name }
                 ?: settings.activeModelId.ifBlank { "No Model Selected" }
-            fileName
-                .removeSuffix(".litertlm")
-                .removeSuffix(".task")
-                .removeSuffix(".bin")
-                .replace("_", " ")
-                .replace("-", " ")
+            shortModelLabel(fileName)
         }
     }
 
@@ -377,11 +381,14 @@ fun ChatScreen(
             ) {
                 TopAppBar(
                     title = {
-                        // ChatterUI-style Center Header: Character Avatar + Name + Subtitle
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable { onNavigateToModels() },
-                        ) {
+                        // ChatterUI-style Center Header: Character Avatar + Name + Subtitle.
+                        // Tapping opens the model quick-switcher (moved here from the composer
+                        // so the composer stays slim).
+                        Box {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.clickable { showModelDropdown = true },
+                            ) {
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
@@ -424,7 +431,21 @@ fun ChatScreen(
                                     )
                                 }
                             }
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Switch model",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp).padding(start = 2.dp),
+                            )
                         }
+                        ModelQuickSwitchMenu(
+                            expanded = showModelDropdown,
+                            onDismiss = { showModelDropdown = false },
+                            viewModel = viewModel,
+                            onNavigateToModels = onNavigateToModels,
+                            onCompareClick = { showCompareDialog = true },
+                        )
+                    }
                     },
                     navigationIcon = {
                         IconButton(onClick = onOpenDrawer) {
@@ -981,254 +1002,6 @@ fun ChatScreen(
                                             onClick = {
                                                 showAttachmentMenu = false
                                                 showSkillsSheet = true
-                                            },
-                                        )
-                                    }
-                                }
-
-                                // 2. Model Selector Pill with Floating Dropup Menu
-                                Box {
-                                    Surface(
-                                        shape = RoundedCornerShape(50),
-                                        color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            1.dp,
-                                            if (showModelDropdown) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
-                                        ),
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(50))
-                                            .clickable { showModelDropdown = true },
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                        ) {
-                                            Text(
-                                                text = modelDisplayName.take(16) + if (modelDisplayName.length > 16) "…" else "",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
-                                            )
-                                            Spacer(Modifier.width(3.dp))
-                                            Icon(
-                                                imageVector = if (showModelDropdown) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
-                                                contentDescription = "Select Model",
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.size(13.dp),
-                                            )
-                                        }
-                                    }
-
-                                    // Floating Dropup Menu
-                                    DropdownMenu(
-                                        expanded = showModelDropdown,
-                                        onDismissRequest = { showModelDropdown = false },
-                                        shape = RoundedCornerShape(14.dp),
-                                        modifier = Modifier.widthIn(min = 240.dp, max = 300.dp),
-                                    ) {
-                                        // Header
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(
-                                                    Icons.Default.Memory,
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.size(15.dp),
-                                                )
-                                                Spacer(Modifier.width(5.dp))
-                                                Text(
-                                                    text = "Model",
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = MaterialTheme.colorScheme.primary,
-                                                )
-                                            }
-                                            Surface(
-                                                shape = RoundedCornerShape(50),
-                                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                            ) {
-                                                Text(
-                                                    text = if (settings.modelSource == ChatConstants.SOURCE_REMOTE) "Remote" else (activeBackend ?: ChatConstants.BACKEND_GPU),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                                                )
-                                            }
-                                        }
-
-                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
-
-                                        if (installedModels.isEmpty() && remoteModels.isEmpty()) {
-                                            DropdownMenuItem(
-                                                text = { Text("No installed models found", style = MaterialTheme.typography.bodySmall) },
-                                                onClick = {
-                                                    showModelDropdown = false
-                                                    onNavigateToModels()
-                                                },
-                                            )
-                                        } else {
-                                            // Installed Models
-                                            installedModels.forEach { model ->
-                                                val isActive = if (settings.customModelPath.isNotBlank()) {
-                                                    settings.customModelPath == model.absolutePath
-                                                } else {
-                                                    settings.activeModelId == model.id
-                                                }
-                                                val isCurrentlyLoaded = isModelLoaded && isActive
-
-                                                DropdownMenuItem(
-                                                    text = {
-                                                        Column {
-                                                            Text(
-                                                                text = model.displayName,
-                                                                style = MaterialTheme.typography.bodySmall,
-                                                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                                                                color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                                                maxLines = 1,
-                                                                overflow = TextOverflow.Ellipsis,
-                                                            )
-                                                            Text(
-                                                                text = "${model.sizeDisplay} · ${if (isCurrentlyLoaded) "In RAM" else "Ready"}",
-                                                                style = MaterialTheme.typography.labelSmall,
-                                                                color = if (isCurrentlyLoaded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                                fontSize = 9.sp,
-                                                            )
-                                                        }
-                                                    },
-                                                    leadingIcon = {
-                                                        Icon(
-                                                            imageVector = if (isActive) Icons.Default.CheckCircle else Icons.Default.Memory,
-                                                            contentDescription = null,
-                                                            tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                            modifier = Modifier.size(16.dp),
-                                                        )
-                                                    },
-                                                    onClick = {
-                                                        showModelDropdown = false
-                                                        viewModel.setModelSource(ChatConstants.SOURCE_LOCAL)
-                                                        if (model.isPreset) {
-                                                            viewModel.setActivePreset(model.id)
-                                                        } else {
-                                                            viewModel.setActiveCustomPath(model.absolutePath)
-                                                        }
-                                                        viewModel.loadActiveModel()
-                                                    },
-                                                )
-                                            }
-
-                                            // Remote Models if any
-                                            if (remoteModels.isNotEmpty()) {
-                                                remoteModels.take(4).forEach { rModel ->
-                                                    val isRemoteActive = settings.modelSource == ChatConstants.SOURCE_REMOTE && settings.remoteModelId == rModel.id
-                                                    DropdownMenuItem(
-                                                        text = {
-                                                            Text(
-                                                                text = rModel.id,
-                                                                style = MaterialTheme.typography.bodySmall,
-                                                                fontWeight = if (isRemoteActive) FontWeight.Bold else FontWeight.Normal,
-                                                                color = if (isRemoteActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                                                maxLines = 1,
-                                                                overflow = TextOverflow.Ellipsis,
-                                                            )
-                                                        },
-                                                        leadingIcon = {
-                                                            Icon(
-                                                                Icons.Default.Dns,
-                                                                contentDescription = null,
-                                                                tint = if (isRemoteActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                                modifier = Modifier.size(16.dp),
-                                                            )
-                                                        },
-                                                        onClick = {
-                                                            showModelDropdown = false
-                                                            viewModel.setModelSource(ChatConstants.SOURCE_REMOTE)
-                                                            viewModel.setRemoteModelId(rModel.id)
-                                                        },
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
-
-                                        if (modelPin == null) {
-                                            DropdownMenuItem(
-                                                text = { Text("Pin this model to this chat", style = MaterialTheme.typography.labelSmall) },
-                                                leadingIcon = {
-                                                    Icon(Icons.Default.PushPin, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                                },
-                                                onClick = {
-                                                    showModelDropdown = false
-                                                    viewModel.pinCurrentModel()
-                                                },
-                                            )
-                                        } else {
-                                            DropdownMenuItem(
-                                                text = { Text("Unpin model (follow global)", style = MaterialTheme.typography.labelSmall) },
-                                                leadingIcon = {
-                                                    Icon(Icons.Default.PushPin, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
-                                                },
-                                                onClick = {
-                                                    showModelDropdown = false
-                                                    viewModel.clearModelPin()
-                                                },
-                                            )
-                                        }
-
-                                        DropdownMenuItem(
-                                            text = {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Text("Compare mode (2 models)", style = MaterialTheme.typography.labelSmall)
-                                                    if (settings.compareMode) {
-                                                        Spacer(Modifier.width(6.dp))
-                                                        Surface(
-                                                            shape = RoundedCornerShape(50),
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                        ) {
-                                                            Text(
-                                                                "ON",
-                                                                style = MaterialTheme.typography.labelSmall,
-                                                                fontSize = 9.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = MaterialTheme.colorScheme.onPrimary,
-                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            leadingIcon = {
-                                                Icon(
-                                                    Icons.Default.CompareArrows,
-                                                    contentDescription = null,
-                                                    tint = if (settings.compareMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(16.dp),
-                                                )
-                                            },
-                                            onClick = {
-                                                showModelDropdown = false
-                                                showCompareDialog = true
-                                            },
-                                        )
-
-                                        DropdownMenuItem(
-                                            text = { Text("Browse Models Hub…", style = MaterialTheme.typography.labelSmall) },
-                                            leadingIcon = {
-                                                Icon(Icons.Default.CloudDownload, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                            },
-                                            onClick = {
-                                                showModelDropdown = false
-                                                onNavigateToModels()
                                             },
                                         )
                                     }

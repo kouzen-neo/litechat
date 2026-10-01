@@ -189,14 +189,26 @@ internal fun EmptyChatHero(
 
         Spacer(Modifier.height(4.dp))
 
+        // Friendly greeting — the raw system prompt used to leak here, which is
+        // internal config, not something the user needs to read.
         Text(
-            text = persona.systemPrompt,
+            text = "What can I help you with today?",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 16.dp),
+        )
+
+        Spacer(Modifier.height(6.dp))
+
+        Text(
+            text = "Powered by $modelName",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 24.dp),
         )
 
         Spacer(Modifier.height(24.dp))

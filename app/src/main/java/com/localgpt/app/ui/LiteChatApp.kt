@@ -87,12 +87,10 @@ import com.localgpt.app.ui.about.AboutScreen
 import com.localgpt.app.ui.characters.CharactersScreen
 import com.localgpt.app.ui.chat.ChatScreen
 import com.localgpt.app.ui.chat.ChatViewModel
-import com.localgpt.app.ui.formatting.FormattingScreen
 import com.localgpt.app.ui.history.HistoryScreen
 import com.localgpt.app.ui.logs.LogsScreen
 import com.localgpt.app.ui.models.ModelsScreen
 import com.localgpt.app.ui.sampler.SamplerScreen
-import com.localgpt.app.ui.server.ServerScreen
 import com.localgpt.app.ui.settings.SettingsScreen
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -102,9 +100,7 @@ object NavRoute {
     const val CHARACTERS = "characters"
     const val SKILLS = "skills"
     const val SAMPLER = "sampler"
-    const val FORMATTING = "formatting"
     const val MODELS = "models"
-    const val SERVER = "server"
     const val LOGS = "logs"
     const val HISTORY = "history"
     const val MCP = "mcp"
@@ -166,11 +162,11 @@ fun LiteChatApp(
                     title = "AI ENGINE & TOOLS",
                     items = listOf(
                         DrawerMenuItem(NavRoute.MODELS, if (isLocalMode) "Models Hub" else "API", Icons.Filled.Memory, Icons.Outlined.Memory),
-                        DrawerMenuItem(NavRoute.SAMPLER, "Generation Parameters", Icons.Filled.Tune, Icons.Outlined.Tune),
-                        DrawerMenuItem(NavRoute.FORMATTING, "Formatting", Icons.Filled.Description, Icons.Outlined.Description),
+                        // "Generation Parameters" + "Formatting" merged into one Chat Settings
+                        // screen (SamplerScreen already hosts both tabs).
+                        DrawerMenuItem(NavRoute.SAMPLER, "Chat Settings", Icons.Filled.Tune, Icons.Outlined.Tune),
                         DrawerMenuItem(NavRoute.SKILLS, "Skills Hub", Icons.Filled.AutoAwesome, Icons.Filled.AutoAwesome),
                         DrawerMenuItem(NavRoute.MCP, "MCP Servers", Icons.Filled.Build, Icons.Outlined.Build),
-                        DrawerMenuItem(NavRoute.SERVER, "Server & Benchmark", Icons.Filled.Dns, Icons.Outlined.Dns),
                     )
                 ),
                 DrawerMenuSection(
@@ -241,7 +237,7 @@ fun LiteChatApp(
                                     fontWeight = FontWeight.Bold,
                                 )
                                 Text(
-                                    "On-Device AI Engine",
+                                    if (isLocalMode) "On-Device AI Engine" else "Remote API Engine",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary,
                                     fontSize = 10.sp,
@@ -410,7 +406,9 @@ fun LiteChatApp(
                                     },
                                     badge = {
                                         when (item.route) {
-                                            NavRoute.SERVER -> {
+                                            // Server status dot now lives on Models Hub / API,
+                                            // which hosts the Server & Benchmark section.
+                                            NavRoute.MODELS -> {
                                                 if (isServerRunning) {
                                                     Surface(
                                                         color = Color(0xFF43A047),
@@ -554,21 +552,8 @@ fun LiteChatApp(
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                     )
                 }
-                composable(NavRoute.FORMATTING) {
-                    FormattingScreen(
-                        viewModel = viewModel,
-                        onOpenDrawer = { scope.launch { drawerState.open() } },
-                    )
-                }
                 composable(NavRoute.MODELS) {
                     ModelsScreen(
-                        viewModel = viewModel,
-                        onOpenDrawer = { scope.launch { drawerState.open() } },
-                        onBack = { navController.popBackStack() },
-                    )
-                }
-                composable(NavRoute.SERVER) {
-                    ServerScreen(
                         viewModel = viewModel,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         onBack = { navController.popBackStack() },

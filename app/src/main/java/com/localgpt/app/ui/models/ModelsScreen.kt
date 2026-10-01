@@ -644,6 +644,11 @@ fun ModelsScreen(
                         )
                     }
                 }
+
+                // ── 7. Local Server & Benchmark (merged from the old drawer destination) ──
+                item(key = "server_benchmark_section") {
+                    com.localgpt.app.ui.server.ServerBenchmarkSection(viewModel = viewModel)
+                }
             } else {
                 // ── Estimated Remote Spend Card ──
                 item(key = "remote_spend_card") {

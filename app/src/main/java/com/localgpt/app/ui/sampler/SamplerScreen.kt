@@ -98,7 +98,7 @@ fun SamplerScreen(
                 Spacer(Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "Generation Parameters",
+                        text = "Chat Settings",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                     )
