@@ -1,4 +1,13 @@
-# LiteChat (LocalGPT)
+<div align="center">
+  <img src="docs/assets/app_icon.png" width="100" alt="LiteChat Logo" />
+  <h1>LiteChat</h1>
+
+  <p>
+    <a href="https://github.com/kouzen-neo/litechat/actions/workflows/build-apk.yml"><img src="https://img.shields.io/github/actions/workflow/status/kouzen-neo/litechat/build-apk.yml?style=for-the-badge&logo=githubactions&logoColor=white" alt="Build"></a>
+    <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Android-API%2026%2B-3DDC84.svg?style=for-the-badge&logo=android&logoColor=white" alt="Android SDK"></a>
+    <a href="https://ai.google.dev/edge/litert"><img src="https://img.shields.io/badge/Google_LiteRT-GPU_Accelerated-4285F4.svg?style=for-the-badge&logo=google&logoColor=white" alt="LiteRT"></a>
+  </p>
+</div>
 
 LiteChat is a standalone, 100% on-device Android AI client and local inference server powered by **Google AI Edge LiteRT-LM** (`com.google.ai.edge.litertlm`). It runs large language models (such as Gemma 4, SmolLM, Llama, and Qwen) directly on smartphone hardware with GPU acceleration (OpenCL) and CPU fallback (Arm NEON / XNNPack).
 
